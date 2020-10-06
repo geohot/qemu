@@ -1,4 +1,4 @@
-#include <glib.h>
+#include "qemu/osdep.h"
 #include <termios.h>
 #include <errno.h>
 #include <unistd.h>

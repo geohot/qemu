@@ -18,6 +18,9 @@
  *
  */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 #include <nettle/nettle-types.h>
 #include <nettle/aes.h>
 #include <nettle/des.h>

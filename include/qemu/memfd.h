@@ -18,6 +18,10 @@
 #define F_SEAL_WRITE    0x0008  /* prevent writes */
 #endif
 
+#if defined CONFIG_LINUX && !defined CONFIG_MEMFD
+int memfd_create(const char *name, unsigned int flags);
+#endif
+
 void *qemu_memfd_alloc(const char *name, size_t size, unsigned int seals,
                        int *fd);
 void qemu_memfd_free(void *ptr, size_t size, int fd);

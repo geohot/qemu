@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/config-file.h"
 #include "block/block_int.h"
@@ -755,10 +756,14 @@ static void blkdebug_refresh_filename(BlockDriverState *bs)
     }
 
     if (!force_json && bs->file->bs->exact_filename[0]) {
-        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
-                 "blkdebug:%s:%s",
-                 qdict_get_try_str(bs->options, "config") ?: "",
-                 bs->file->bs->exact_filename);
+        int ret = snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                           "blkdebug:%s:%s",
+                           qdict_get_try_str(bs->options, "config"),
+                           bs->file->bs->exact_filename);
+        if (ret >= sizeof(bs->exact_filename)) {
+            /* An overflow makes the filename unusable, so do not report any */
+            bs->exact_filename[0] = 0;
+        }
     }
 
     opts = qdict_new();

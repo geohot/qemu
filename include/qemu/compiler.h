@@ -77,20 +77,20 @@
 #define typeof_field(type, field) typeof(((type *)0)->field)
 #define type_check(t1,t2) ((t1*)0 - (t2*)0)
 
-#ifndef always_inline
-#if !((__GNUC__ < 3) || defined(__APPLE__))
-#ifdef __OPTIMIZE__
-#undef inline
-#define inline __attribute__ (( always_inline )) __inline__
-#endif
-#endif
+#define QEMU_BUILD_BUG_ON_STRUCT(x) \
+    struct { \
+        int:(x) ? -1 : 1; \
+    }
+
+#ifdef __COUNTER__
+#define QEMU_BUILD_BUG_ON(x) typedef QEMU_BUILD_BUG_ON_STRUCT(x) \
+    glue(qemu_build_bug_on__, __COUNTER__) __attribute__((unused))
 #else
-#undef inline
-#define inline always_inline
+#define QEMU_BUILD_BUG_ON(x)
 #endif
 
-#define QEMU_BUILD_BUG_ON(x) \
-    typedef char glue(qemu_build_bug_on__,__LINE__)[(x)?-1:1] __attribute__((unused));
+#define QEMU_BUILD_BUG_ON_ZERO(x) (sizeof(QEMU_BUILD_BUG_ON_STRUCT(x)) - \
+                                   sizeof(QEMU_BUILD_BUG_ON_STRUCT(x)))
 
 #if defined __GNUC__
 # if !QEMU_GNUC_PREREQ(4, 4)
@@ -107,6 +107,25 @@
 # endif
 #else
 #define GCC_FMT_ATTR(n, m)
+#endif
+
+#ifndef __has_warning
+#define __has_warning(x) 0 /* compatibility with non-clang compilers */
+#endif
+
+/*
+ * The nonstring variable attribute specifies that an object or member
+ * declaration with type array of char or pointer to char is intended
+ * to store character arrays that do not necessarily contain a terminating
+ * NUL character. This is useful in detecting uses of such arrays or pointers
+ * with functions that expect NUL-terminated strings, and to avoid warnings
+ * when such an array or pointer is used as an argument to a bounded string
+ * manipulation function such as strncpy.
+ */
+#if __has_attribute(nonstring)
+# define QEMU_NONSTRING __attribute__((nonstring))
+#else
+# define QEMU_NONSTRING
 #endif
 
 #endif /* COMPILER_H */

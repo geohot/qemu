@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <glib.h>
 #include <windows.h>
 #include <errno.h>
 #include <io.h>

@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "block/block_int.h"
 #include "qemu/module.h"
@@ -110,8 +111,8 @@ static int qcow2_read_extensions(BlockDriverState *bs, uint64_t start_offset,
                              "pread fail from offset %" PRIu64, offset);
             return 1;
         }
-        be32_to_cpus(&ext.magic);
-        be32_to_cpus(&ext.len);
+        ext.magic = be32_to_cpu(ext.magic);
+        ext.len = be32_to_cpu(ext.len);
         offset += sizeof(ext);
 #ifdef DEBUG_EXT
         printf("ext.magic = 0x%x\n", ext.magic);
@@ -833,19 +834,20 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
         error_setg_errno(errp, -ret, "Could not read qcow2 header");
         goto fail;
     }
-    be32_to_cpus(&header.magic);
-    be32_to_cpus(&header.version);
-    be64_to_cpus(&header.backing_file_offset);
-    be32_to_cpus(&header.backing_file_size);
-    be64_to_cpus(&header.size);
-    be32_to_cpus(&header.cluster_bits);
-    be32_to_cpus(&header.crypt_method);
-    be64_to_cpus(&header.l1_table_offset);
-    be32_to_cpus(&header.l1_size);
-    be64_to_cpus(&header.refcount_table_offset);
-    be32_to_cpus(&header.refcount_table_clusters);
-    be64_to_cpus(&header.snapshots_offset);
-    be32_to_cpus(&header.nb_snapshots);
+    header.magic = be32_to_cpu(header.magic);
+    header.version = be32_to_cpu(header.version);
+    header.backing_file_offset = be64_to_cpu(header.backing_file_offset);
+    header.backing_file_size = be32_to_cpu(header.backing_file_size);
+    header.size = be64_to_cpu(header.size);
+    header.cluster_bits = be32_to_cpu(header.cluster_bits);
+    header.crypt_method = be32_to_cpu(header.crypt_method);
+    header.l1_table_offset = be64_to_cpu(header.l1_table_offset);
+    header.l1_size = be32_to_cpu(header.l1_size);
+    header.refcount_table_offset = be64_to_cpu(header.refcount_table_offset);
+    header.refcount_table_clusters =
+        be32_to_cpu(header.refcount_table_clusters);
+    header.snapshots_offset = be64_to_cpu(header.snapshots_offset);
+    header.nb_snapshots = be32_to_cpu(header.nb_snapshots);
 
     if (header.magic != QCOW_MAGIC) {
         error_setg(errp, "Image is not in qcow2 format");
@@ -881,11 +883,12 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
         header.refcount_order           = 4;
         header.header_length            = 72;
     } else {
-        be64_to_cpus(&header.incompatible_features);
-        be64_to_cpus(&header.compatible_features);
-        be64_to_cpus(&header.autoclear_features);
-        be32_to_cpus(&header.refcount_order);
-        be32_to_cpus(&header.header_length);
+        header.incompatible_features =
+            be64_to_cpu(header.incompatible_features);
+        header.compatible_features = be64_to_cpu(header.compatible_features);
+        header.autoclear_features = be64_to_cpu(header.autoclear_features);
+        header.refcount_order = be32_to_cpu(header.refcount_order);
+        header.header_length = be32_to_cpu(header.header_length);
 
         if (header.header_length < 104) {
             error_setg(errp, "qcow2 header too short");
@@ -1070,7 +1073,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
             goto fail;
         }
         for(i = 0;i < s->l1_size; i++) {
-            be64_to_cpus(&s->l1_table[i]);
+            s->l1_table[i] = be64_to_cpu(s->l1_table[i]);
         }
     }
 
@@ -2577,9 +2580,9 @@ static int make_completely_empty(BlockDriverState *bs)
     /* "Create" an empty reftable (one cluster) directly after the image
      * header and an empty L1 table three clusters after the image header;
      * the cluster between those two will be used as the first refblock */
-    cpu_to_be64w(&l1_ofs_rt_ofs_cls.l1_offset, 3 * s->cluster_size);
-    cpu_to_be64w(&l1_ofs_rt_ofs_cls.reftable_offset, s->cluster_size);
-    cpu_to_be32w(&l1_ofs_rt_ofs_cls.reftable_clusters, 1);
+    l1_ofs_rt_ofs_cls.l1_offset = cpu_to_be64(3 * s->cluster_size);
+    l1_ofs_rt_ofs_cls.reftable_offset = cpu_to_be64(s->cluster_size);
+    l1_ofs_rt_ofs_cls.reftable_clusters = cpu_to_be32(1);
     ret = bdrv_pwrite_sync(bs->file->bs, offsetof(QCowHeader, l1_table_offset),
                            &l1_ofs_rt_ofs_cls, sizeof(l1_ofs_rt_ofs_cls));
     if (ret < 0) {

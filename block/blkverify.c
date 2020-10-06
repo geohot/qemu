@@ -7,7 +7,7 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <stdarg.h>
+#include "qemu/osdep.h"
 #include "qemu/sockets.h" /* for EINPROGRESS on Windows */
 #include "block/block_int.h"
 #include "qapi/qmp/qdict.h"
@@ -332,10 +332,14 @@ static void blkverify_refresh_filename(BlockDriverState *bs)
     if (bs->file->bs->exact_filename[0]
         && s->test_file->bs->exact_filename[0])
     {
-        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
-                 "blkverify:%s:%s",
-                 bs->file->bs->exact_filename,
-                 s->test_file->bs->exact_filename);
+        int ret = snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                           "blkverify:%s:%s",
+                           bs->file->bs->exact_filename,
+                           s->test_file->bs->exact_filename);
+        if (ret >= sizeof(bs->exact_filename)) {
+            /* An overflow makes the filename unusable, so do not report any */
+            bs->exact_filename[0] = 0;
+        }
     }
 }
 

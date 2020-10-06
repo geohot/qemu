@@ -11,7 +11,7 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
+#include "qemu/osdep.h"
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
