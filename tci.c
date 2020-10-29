@@ -537,6 +537,7 @@ void resize_change_buffer(size_t size) {
   if(ftruncate(GLOBAL_qira_log_fd, size)) {
     perror("ftruncate");
   }
+  if (GLOBAL_change_buffer) munmap(GLOBAL_change_buffer, GLOBAL_change_size * sizeof(struct change));
   GLOBAL_change_buffer = mmap(NULL, size,
          PROT_READ | PROT_WRITE, MAP_SHARED, GLOBAL_qira_log_fd, 0);
   GLOBAL_logstate = (struct logstate *)GLOBAL_change_buffer;
