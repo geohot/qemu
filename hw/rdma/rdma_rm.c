@@ -37,6 +37,8 @@ void rdma_dump_device_counters(Monitor *mon, RdmaDeviceResources *dev_res)
                    dev_res->stats.tx_err);
     monitor_printf(mon, "\trx_bufs          : %" PRId64 "\n",
                    dev_res->stats.rx_bufs);
+    monitor_printf(mon, "\trx_srq           : %" PRId64 "\n",
+                   dev_res->stats.rx_srq);
     monitor_printf(mon, "\trx_bufs_len      : %" PRId64 "\n",
                    dev_res->stats.rx_bufs_len);
     monitor_printf(mon, "\trx_bufs_err      : %" PRId64 "\n",
@@ -145,14 +147,13 @@ static inline void rdma_res_tbl_dealloc(RdmaRmResTbl *tbl, uint32_t handle)
 {
     trace_rdma_res_tbl_dealloc(tbl->name, handle);
 
-    qemu_mutex_lock(&tbl->lock);
+    QEMU_LOCK_GUARD(&tbl->lock);
 
     if (handle < tbl->tbl_sz) {
         clear_bit(handle, tbl->bitmap);
         tbl->used--;
     }
 
-    qemu_mutex_unlock(&tbl->lock);
 }
 
 int rdma_rm_alloc_pd(RdmaDeviceResources *dev_res, RdmaBackendDev *backend_dev,
@@ -226,15 +227,19 @@ int rdma_rm_alloc_mr(RdmaDeviceResources *dev_res, uint32_t pd_handle,
         mr->virt += (mr->start & (TARGET_PAGE_SIZE - 1));
 
         ret = rdma_backend_create_mr(&mr->backend_mr, &pd->backend_pd, mr->virt,
-                                     mr->length, access_flags);
+                                     mr->length, guest_start, access_flags);
         if (ret) {
             ret = -EIO;
             goto out_dealloc_mr;
         }
+#ifdef LEGACY_RDMA_REG_MR
+        /* We keep mr_handle in lkey so send and recv get get mr ptr */
+        *lkey = *mr_handle;
+#else
+        *lkey = rdma_backend_mr_lkey(&mr->backend_mr);
+#endif
     }
 
-    /* We keep mr_handle in lkey so send and recv get get mr ptr */
-    *lkey = *mr_handle;
     *rkey = -1;
 
     mr->pd_handle = pd_handle;
@@ -384,12 +389,14 @@ int rdma_rm_alloc_qp(RdmaDeviceResources *dev_res, uint32_t pd_handle,
                      uint8_t qp_type, uint32_t max_send_wr,
                      uint32_t max_send_sge, uint32_t send_cq_handle,
                      uint32_t max_recv_wr, uint32_t max_recv_sge,
-                     uint32_t recv_cq_handle, void *opaque, uint32_t *qpn)
+                     uint32_t recv_cq_handle, void *opaque, uint32_t *qpn,
+                     uint8_t is_srq, uint32_t srq_handle)
 {
     int rc;
     RdmaRmQP *qp;
     RdmaRmCQ *scq, *rcq;
     RdmaRmPD *pd;
+    RdmaRmSRQ *srq = NULL;
     uint32_t rm_qpn;
 
     pd = rdma_rm_get_pd(dev_res, pd_handle);
@@ -404,6 +411,16 @@ int rdma_rm_alloc_qp(RdmaDeviceResources *dev_res, uint32_t pd_handle,
         rdma_error_report("Invalid send_cqn or recv_cqn (%d, %d)",
                           send_cq_handle, recv_cq_handle);
         return -EINVAL;
+    }
+
+    if (is_srq) {
+        srq = rdma_rm_get_srq(dev_res, srq_handle);
+        if (!srq) {
+            rdma_error_report("Invalid srqn %d", srq_handle);
+            return -EINVAL;
+        }
+
+        srq->recv_cq_handle = recv_cq_handle;
     }
 
     if (qp_type == IBV_QPT_GSI) {
@@ -422,10 +439,14 @@ int rdma_rm_alloc_qp(RdmaDeviceResources *dev_res, uint32_t pd_handle,
     qp->send_cq_handle = send_cq_handle;
     qp->recv_cq_handle = recv_cq_handle;
     qp->opaque = opaque;
+    qp->is_srq = is_srq;
 
     rc = rdma_backend_create_qp(&qp->backend_qp, qp_type, &pd->backend_pd,
-                                &scq->backend_cq, &rcq->backend_cq, max_send_wr,
-                                max_recv_wr, max_send_sge, max_recv_sge);
+                                &scq->backend_cq, &rcq->backend_cq,
+                                is_srq ? &srq->backend_srq : NULL,
+                                max_send_wr, max_recv_wr, max_send_sge,
+                                max_recv_sge);
+
     if (rc) {
         rc = -EIO;
         goto out_dealloc_qp;
@@ -540,6 +561,96 @@ void rdma_rm_dealloc_qp(RdmaDeviceResources *dev_res, uint32_t qp_handle)
     rdma_backend_destroy_qp(&qp->backend_qp, dev_res);
 
     rdma_res_tbl_dealloc(&dev_res->qp_tbl, qp->qpn);
+}
+
+RdmaRmSRQ *rdma_rm_get_srq(RdmaDeviceResources *dev_res, uint32_t srq_handle)
+{
+    return rdma_res_tbl_get(&dev_res->srq_tbl, srq_handle);
+}
+
+int rdma_rm_alloc_srq(RdmaDeviceResources *dev_res, uint32_t pd_handle,
+                      uint32_t max_wr, uint32_t max_sge, uint32_t srq_limit,
+                      uint32_t *srq_handle, void *opaque)
+{
+    RdmaRmSRQ *srq;
+    RdmaRmPD *pd;
+    int rc;
+
+    pd = rdma_rm_get_pd(dev_res, pd_handle);
+    if (!pd) {
+        return -EINVAL;
+    }
+
+    srq = rdma_res_tbl_alloc(&dev_res->srq_tbl, srq_handle);
+    if (!srq) {
+        return -ENOMEM;
+    }
+
+    rc = rdma_backend_create_srq(&srq->backend_srq, &pd->backend_pd,
+                                 max_wr, max_sge, srq_limit);
+    if (rc) {
+        rc = -EIO;
+        goto out_dealloc_srq;
+    }
+
+    srq->opaque = opaque;
+
+    return 0;
+
+out_dealloc_srq:
+    rdma_res_tbl_dealloc(&dev_res->srq_tbl, *srq_handle);
+
+    return rc;
+}
+
+int rdma_rm_query_srq(RdmaDeviceResources *dev_res, uint32_t srq_handle,
+                      struct ibv_srq_attr *srq_attr)
+{
+    RdmaRmSRQ *srq;
+
+    srq = rdma_rm_get_srq(dev_res, srq_handle);
+    if (!srq) {
+        return -EINVAL;
+    }
+
+    return rdma_backend_query_srq(&srq->backend_srq, srq_attr);
+}
+
+int rdma_rm_modify_srq(RdmaDeviceResources *dev_res, uint32_t srq_handle,
+                       struct ibv_srq_attr *srq_attr, int srq_attr_mask)
+{
+    RdmaRmSRQ *srq;
+
+    srq = rdma_rm_get_srq(dev_res, srq_handle);
+    if (!srq) {
+        return -EINVAL;
+    }
+
+    if ((srq_attr_mask & IBV_SRQ_LIMIT) &&
+        (srq_attr->srq_limit == 0)) {
+        return -EINVAL;
+    }
+
+    if ((srq_attr_mask & IBV_SRQ_MAX_WR) &&
+        (srq_attr->max_wr == 0)) {
+        return -EINVAL;
+    }
+
+    return rdma_backend_modify_srq(&srq->backend_srq, srq_attr,
+                                   srq_attr_mask);
+}
+
+void rdma_rm_dealloc_srq(RdmaDeviceResources *dev_res, uint32_t srq_handle)
+{
+    RdmaRmSRQ *srq;
+
+    srq = rdma_rm_get_srq(dev_res, srq_handle);
+    if (!srq) {
+        return;
+    }
+
+    rdma_backend_destroy_srq(&srq->backend_srq, dev_res);
+    rdma_res_tbl_dealloc(&dev_res->srq_tbl, srq_handle);
 }
 
 void *rdma_rm_get_cqe_ctx(RdmaDeviceResources *dev_res, uint32_t cqe_ctx_id)
@@ -671,13 +782,15 @@ int rdma_rm_init(RdmaDeviceResources *dev_res, struct ibv_device_attr *dev_attr)
     res_tbl_init("CQE_CTX", &dev_res->cqe_ctx_tbl, dev_attr->max_qp *
                        dev_attr->max_qp_wr, sizeof(void *));
     res_tbl_init("UC", &dev_res->uc_tbl, MAX_UCS, sizeof(RdmaRmUC));
+    res_tbl_init("SRQ", &dev_res->srq_tbl, dev_attr->max_srq,
+                 sizeof(RdmaRmSRQ));
 
     init_ports(dev_res);
 
     qemu_mutex_init(&dev_res->lock);
 
     memset(&dev_res->stats, 0, sizeof(dev_res->stats));
-    atomic_set(&dev_res->stats.missing_cqe, 0);
+    qatomic_set(&dev_res->stats.missing_cqe, 0);
 
     return 0;
 }
@@ -689,6 +802,7 @@ void rdma_rm_fini(RdmaDeviceResources *dev_res, RdmaBackendDev *backend_dev,
 
     fini_ports(dev_res, backend_dev, ifname);
 
+    res_tbl_free(&dev_res->srq_tbl);
     res_tbl_free(&dev_res->uc_tbl);
     res_tbl_free(&dev_res->cqe_ctx_tbl);
     res_tbl_free(&dev_res->qp_tbl);

@@ -28,8 +28,8 @@ status=1	# failure is the default!
 
 _cleanup()
 {
-	rm -f "$TEST_IMG.orig"
-	_cleanup_test_img
+    _rm_test_img "$TEST_IMG.orig"
+    _cleanup_test_img
 }
 trap "_cleanup; exit \$status" 0 1 2 3 15
 
@@ -39,7 +39,6 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt qcow2 qcow
 _supported_proto file
-_supported_os Linux
 
 echo
 echo "== Creating single sector image =="

@@ -20,8 +20,11 @@
 
 #include "qemu/osdep.h"
 #include "hw/char/imx_serial.h"
-#include "sysemu/sysemu.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #ifndef DEBUG_IMX_UART
 #define DEBUG_IMX_UART 0
@@ -320,7 +323,7 @@ static void imx_receive(void *opaque, const uint8_t *buf, int size)
     imx_put_data(opaque, *buf);
 }
 
-static void imx_event(void *opaque, int event)
+static void imx_event(void *opaque, QEMUChrEvent event)
 {
     if (event == CHR_EVENT_BREAK) {
         imx_put_data(opaque, URXD_BRK | URXD_FRMERR | URXD_ERR);
@@ -369,7 +372,7 @@ static void imx_serial_class_init(ObjectClass *klass, void *data)
     dc->reset = imx_serial_reset_at_boot;
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
     dc->desc = "i.MX series UART";
-    dc->props = imx_serial_properties;
+    device_class_set_props(dc, imx_serial_properties);
 }
 
 static const TypeInfo imx_serial_info = {

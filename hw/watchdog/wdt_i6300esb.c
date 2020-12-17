@@ -21,11 +21,12 @@
 
 #include "qemu/osdep.h"
 
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 #include "sysemu/watchdog.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
 
 /*#define I6300ESB_DEBUG 1*/
 
@@ -101,11 +102,9 @@ struct I6300State {
                                  */
 };
 
-typedef struct I6300State I6300State;
 
 #define TYPE_WATCHDOG_I6300ESB_DEVICE "i6300esb"
-#define WATCHDOG_I6300ESB_DEVICE(obj) \
-    OBJECT_CHECK(I6300State, (obj), TYPE_WATCHDOG_I6300ESB_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(I6300State, WATCHDOG_I6300ESB_DEVICE)
 
 /* This function is called when the watchdog has either been enabled
  * (hence it starts counting down) or has been keep-alived.
@@ -200,7 +199,7 @@ static void i6300esb_timer_expired(void *vp)
         if (d->reboot_enabled) {
             d->previous_reboot_flag = 1;
             watchdog_perform_action(); /* This reboots, exits, etc */
-            i6300esb_reset(&d->dev.qdev);
+            i6300esb_reset(DEVICE(d));
         }
 
         /* In "free running mode" we start stage 1 again. */

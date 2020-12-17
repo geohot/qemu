@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,10 +18,12 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "qemu/error-report.h"
+#include "qemu/qemu-print.h"
 #include "sysemu/hw_accel.h"
 #include "kvm_ppc.h"
 #include "mmu-hash64.h"
@@ -29,7 +31,7 @@
 #include "hw/hw.h"
 #include "mmu-book3s-v3.h"
 
-//#define DEBUG_SLB
+/* #define DEBUG_SLB */
 
 #ifdef DEBUG_SLB
 #  define LOG_SLB(...) qemu_log_mask(CPU_LOG_MMU, __VA_ARGS__)
@@ -57,9 +59,11 @@ static ppc_slb_t *slb_lookup(PowerPCCPU *cpu, target_ulong eaddr)
 
         LOG_SLB("%s: slot %d %016" PRIx64 " %016"
                     PRIx64 "\n", __func__, n, slb->esid, slb->vsid);
-        /* We check for 1T matches on all MMUs here - if the MMU
+        /*
+         * We check for 1T matches on all MMUs here - if the MMU
          * doesn't have 1T segment support, we will have prevented 1T
-         * entries from being inserted in the slbmte code. */
+         * entries from being inserted in the slbmte code.
+         */
         if (((slb->esid == esid_256M) &&
              ((slb->vsid & SLB_VSID_B) == SLB_VSID_B_256M))
             || ((slb->esid == esid_1T) &&
@@ -71,7 +75,7 @@ static ppc_slb_t *slb_lookup(PowerPCCPU *cpu, target_ulong eaddr)
     return NULL;
 }
 
-void dump_slb(FILE *f, fprintf_function cpu_fprintf, PowerPCCPU *cpu)
+void dump_slb(PowerPCCPU *cpu)
 {
     CPUPPCState *env = &cpu->env;
     int i;
@@ -79,42 +83,94 @@ void dump_slb(FILE *f, fprintf_function cpu_fprintf, PowerPCCPU *cpu)
 
     cpu_synchronize_state(CPU(cpu));
 
-    cpu_fprintf(f, "SLB\tESID\t\t\tVSID\n");
+    qemu_printf("SLB\tESID\t\t\tVSID\n");
     for (i = 0; i < cpu->hash64_opts->slb_size; i++) {
         slbe = env->slb[i].esid;
         slbv = env->slb[i].vsid;
         if (slbe == 0 && slbv == 0) {
             continue;
         }
-        cpu_fprintf(f, "%d\t0x%016" PRIx64 "\t0x%016" PRIx64 "\n",
+        qemu_printf("%d\t0x%016" PRIx64 "\t0x%016" PRIx64 "\n",
                     i, slbe, slbv);
     }
 }
 
-void helper_slbia(CPUPPCState *env)
+void helper_slbia(CPUPPCState *env, uint32_t ih)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
+    int starting_entry;
     int n;
 
-    /* XXX: Warning: slbia never invalidates the first segment */
-    for (n = 1; n < cpu->hash64_opts->slb_size; n++) {
+    /*
+     * slbia must always flush all TLB (which is equivalent to ERAT in ppc
+     * architecture). Matching on SLB_ESID_V is not good enough, because slbmte
+     * can overwrite a valid SLB without flushing its lookaside information.
+     *
+     * It would be possible to keep the TLB in synch with the SLB by flushing
+     * when a valid entry is overwritten by slbmte, and therefore slbia would
+     * not have to flush unless it evicts a valid SLB entry. However it is
+     * expected that slbmte is more common than slbia, and slbia is usually
+     * going to evict valid SLB entries, so that tradeoff is unlikely to be a
+     * good one.
+     *
+     * ISA v2.05 introduced IH field with values 0,1,2,6. These all invalidate
+     * the same SLB entries (everything but entry 0), but differ in what
+     * "lookaside information" is invalidated. TCG can ignore this and flush
+     * everything.
+     *
+     * ISA v3.0 introduced additional values 3,4,7, which change what SLBs are
+     * invalidated.
+     */
+
+    env->tlb_need_flush |= TLB_NEED_LOCAL_FLUSH;
+
+    starting_entry = 1; /* default for IH=0,1,2,6 */
+
+    if (env->mmu_model == POWERPC_MMU_3_00) {
+        switch (ih) {
+        case 0x7:
+            /* invalidate no SLBs, but all lookaside information */
+            return;
+
+        case 0x3:
+        case 0x4:
+            /* also considers SLB entry 0 */
+            starting_entry = 0;
+            break;
+
+        case 0x5:
+            /* treat undefined values as ih==0, and warn */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "slbia undefined IH field %u.\n", ih);
+            break;
+
+        default:
+            /* 0,1,2,6 */
+            break;
+        }
+    }
+
+    for (n = starting_entry; n < cpu->hash64_opts->slb_size; n++) {
         ppc_slb_t *slb = &env->slb[n];
 
-        if (slb->esid & SLB_ESID_V) {
-            slb->esid &= ~SLB_ESID_V;
-            /* XXX: given the fact that segment size is 256 MB or 1TB,
-             *      and we still don't have a tlb_flush_mask(env, n, mask)
-             *      in QEMU, we just invalidate all TLBs
-             */
-            env->tlb_need_flush |= TLB_NEED_LOCAL_FLUSH;
+        if (!(slb->esid & SLB_ESID_V)) {
+            continue;
         }
+        if (env->mmu_model == POWERPC_MMU_3_00) {
+            if (ih == 0x3 && (slb->vsid & SLB_VSID_C) == 0) {
+                /* preserves entries with a class value of 0 */
+                continue;
+            }
+        }
+
+        slb->esid &= ~SLB_ESID_V;
     }
 }
 
 static void __helper_slbie(CPUPPCState *env, target_ulong addr,
                            target_ulong global)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     ppc_slb_t *slb;
 
     slb = slb_lookup(cpu, addr);
@@ -125,7 +181,8 @@ static void __helper_slbie(CPUPPCState *env, target_ulong addr,
     if (slb->esid & SLB_ESID_V) {
         slb->esid &= ~SLB_ESID_V;
 
-        /* XXX: given the fact that segment size is 256 MB or 1TB,
+        /*
+         * XXX: given the fact that segment size is 256 MB or 1TB,
          *      and we still don't have a tlb_flush_mask(env, n, mask)
          *      in QEMU, we just invalidate all TLBs
          */
@@ -246,7 +303,7 @@ static int ppc_find_slb_vsid(PowerPCCPU *cpu, target_ulong rb,
 
 void helper_store_slb(CPUPPCState *env, target_ulong rb, target_ulong rs)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
 
     if (ppc_store_slb(cpu, rb & 0xfff, rb & ~0xfffULL, rs) < 0) {
         raise_exception_err_ra(env, POWERPC_EXCP_PROGRAM,
@@ -256,7 +313,7 @@ void helper_store_slb(CPUPPCState *env, target_ulong rb, target_ulong rs)
 
 target_ulong helper_load_slb_esid(CPUPPCState *env, target_ulong rb)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     target_ulong rt = 0;
 
     if (ppc_load_slb_esid(cpu, rb, &rt) < 0) {
@@ -268,7 +325,7 @@ target_ulong helper_load_slb_esid(CPUPPCState *env, target_ulong rb)
 
 target_ulong helper_find_slb_vsid(CPUPPCState *env, target_ulong rb)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     target_ulong rt = 0;
 
     if (ppc_find_slb_vsid(cpu, rb, &rt) < 0) {
@@ -280,7 +337,7 @@ target_ulong helper_find_slb_vsid(CPUPPCState *env, target_ulong rb)
 
 target_ulong helper_load_slb_vsid(CPUPPCState *env, target_ulong rb)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     target_ulong rt = 0;
 
     if (ppc_load_slb_vsid(cpu, rb, &rt) < 0) {
@@ -305,8 +362,10 @@ static int ppc_hash64_pte_prot(PowerPCCPU *cpu,
 {
     CPUPPCState *env = &cpu->env;
     unsigned pp, key;
-    /* Some pp bit combinations have undefined behaviour, so default
-     * to no access in those cases */
+    /*
+     * Some pp bit combinations have undefined behaviour, so default
+     * to no access in those cases
+     */
     int prot = 0;
 
     key = !!(msr_pr ? (slb->vsid & SLB_VSID_KP)
@@ -375,7 +434,7 @@ static int ppc_hash64_amr_prot(PowerPCCPU *cpu, ppc_hash_pte64_t pte)
     }
 
     key = HPTE64_R_KEY(pte.pte1);
-    amrbits = (env->spr[SPR_AMR] >> 2*(31 - key)) & 0x3;
+    amrbits = (env->spr[SPR_AMR] >> 2 * (31 - key)) & 0x3;
 
     /* fprintf(stderr, "AMR protection: key=%d AMR=0x%" PRIx64 "\n", key, */
     /*         env->spr[SPR_AMR]); */
@@ -546,8 +605,9 @@ static hwaddr ppc_hash64_pteg_search(PowerPCCPU *cpu, hwaddr hash,
             if (*pshift == 0) {
                 continue;
             }
-            /* We don't do anything with pshift yet as qemu TLB only deals
-             * with 4K pages anyway
+            /*
+             * We don't do anything with pshift yet as qemu TLB only
+             * deals with 4K pages anyway
              */
             pte->pte0 = pte0;
             pte->pte1 = pte1;
@@ -571,8 +631,10 @@ static hwaddr ppc_hash64_htab_lookup(PowerPCCPU *cpu,
     uint64_t vsid, epnmask, epn, ptem;
     const PPCHash64SegmentPageSizes *sps = slb->sps;
 
-    /* The SLB store path should prevent any bad page size encodings
-     * getting in there, so: */
+    /*
+     * The SLB store path should prevent any bad page size encodings
+     * getting in there, so:
+     */
     assert(sps);
 
     /* If ISL is set in LPCR we need to clamp the page size to 4K */
@@ -658,6 +720,21 @@ unsigned ppc_hash64_hpte_page_shift_noslb(PowerPCCPU *cpu,
     return 0;
 }
 
+static bool ppc_hash64_use_vrma(CPUPPCState *env)
+{
+    switch (env->mmu_model) {
+    case POWERPC_MMU_3_00:
+        /*
+         * ISAv3.0 (POWER9) always uses VRMA, the VPM0 field and RMOR
+         * register no longer exist
+         */
+        return true;
+
+    default:
+        return !!(env->spr[SPR_LPCR] & LPCR_VPM0);
+    }
+}
+
 static void ppc_hash64_set_isi(CPUState *cs, uint64_t error_code)
 {
     CPUPPCState *env = &POWERPC_CPU(cs)->env;
@@ -666,15 +743,7 @@ static void ppc_hash64_set_isi(CPUState *cs, uint64_t error_code)
     if (msr_ir) {
         vpm = !!(env->spr[SPR_LPCR] & LPCR_VPM1);
     } else {
-        switch (env->mmu_model) {
-        case POWERPC_MMU_3_00:
-            /* Field deprecated in ISAv3.00 - interrupts always go to hyperv */
-            vpm = true;
-            break;
-        default:
-            vpm = !!(env->spr[SPR_LPCR] & LPCR_VPM0);
-            break;
-        }
+        vpm = ppc_hash64_use_vrma(env);
     }
     if (vpm && !msr_hv) {
         cs->exception_index = POWERPC_EXCP_HISI;
@@ -692,15 +761,7 @@ static void ppc_hash64_set_dsi(CPUState *cs, uint64_t dar, uint64_t dsisr)
     if (msr_dr) {
         vpm = !!(env->spr[SPR_LPCR] & LPCR_VPM1);
     } else {
-        switch (env->mmu_model) {
-        case POWERPC_MMU_3_00:
-            /* Field deprecated in ISAv3.00 - interrupts always go to hyperv */
-            vpm = true;
-            break;
-        default:
-            vpm = !!(env->spr[SPR_LPCR] & LPCR_VPM0);
-            break;
-        }
+        vpm = ppc_hash64_use_vrma(env);
     }
     if (vpm && !msr_hv) {
         cs->exception_index = POWERPC_EXCP_HDSI;
@@ -715,56 +776,152 @@ static void ppc_hash64_set_dsi(CPUState *cs, uint64_t dar, uint64_t dsisr)
 }
 
 
+static void ppc_hash64_set_r(PowerPCCPU *cpu, hwaddr ptex, uint64_t pte1)
+{
+    hwaddr base, offset = ptex * HASH_PTE_SIZE_64 + 16;
+
+    if (cpu->vhyp) {
+        PPCVirtualHypervisorClass *vhc =
+            PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
+        vhc->hpte_set_r(cpu->vhyp, ptex, pte1);
+        return;
+    }
+    base = ppc_hash64_hpt_base(cpu);
+
+
+    /* The HW performs a non-atomic byte update */
+    stb_phys(CPU(cpu)->as, base + offset, ((pte1 >> 8) & 0xff) | 0x01);
+}
+
+static void ppc_hash64_set_c(PowerPCCPU *cpu, hwaddr ptex, uint64_t pte1)
+{
+    hwaddr base, offset = ptex * HASH_PTE_SIZE_64 + 15;
+
+    if (cpu->vhyp) {
+        PPCVirtualHypervisorClass *vhc =
+            PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
+        vhc->hpte_set_c(cpu->vhyp, ptex, pte1);
+        return;
+    }
+    base = ppc_hash64_hpt_base(cpu);
+
+    /* The HW performs a non-atomic byte update */
+    stb_phys(CPU(cpu)->as, base + offset, (pte1 & 0xff) | 0x80);
+}
+
+static target_ulong rmls_limit(PowerPCCPU *cpu)
+{
+    CPUPPCState *env = &cpu->env;
+    /*
+     * In theory the meanings of RMLS values are implementation
+     * dependent.  In practice, this seems to have been the set from
+     * POWER4+..POWER8, and RMLS is no longer supported in POWER9.
+     *
+     * Unsupported values mean the OS has shot itself in the
+     * foot. Return a 0-sized RMA in this case, which we expect
+     * to trigger an immediate DSI or ISI
+     */
+    static const target_ulong rma_sizes[16] = {
+        [0] = 256 * GiB,
+        [1] = 16 * GiB,
+        [2] = 1 * GiB,
+        [3] = 64 * MiB,
+        [4] = 256 * MiB,
+        [7] = 128 * MiB,
+        [8] = 32 * MiB,
+    };
+    target_ulong rmls = (env->spr[SPR_LPCR] & LPCR_RMLS) >> LPCR_RMLS_SHIFT;
+
+    return rma_sizes[rmls];
+}
+
+static int build_vrma_slbe(PowerPCCPU *cpu, ppc_slb_t *slb)
+{
+    CPUPPCState *env = &cpu->env;
+    target_ulong lpcr = env->spr[SPR_LPCR];
+    uint32_t vrmasd = (lpcr & LPCR_VRMASD) >> LPCR_VRMASD_SHIFT;
+    target_ulong vsid = SLB_VSID_VRMA | ((vrmasd << 4) & SLB_VSID_LLP_MASK);
+    int i;
+
+    for (i = 0; i < PPC_PAGE_SIZES_MAX_SZ; i++) {
+        const PPCHash64SegmentPageSizes *sps = &cpu->hash64_opts->sps[i];
+
+        if (!sps->page_shift) {
+            break;
+        }
+
+        if ((vsid & SLB_VSID_LLP_MASK) == sps->slb_enc) {
+            slb->esid = SLB_ESID_V;
+            slb->vsid = vsid;
+            slb->sps = sps;
+            return 0;
+        }
+    }
+
+    error_report("Bad page size encoding in LPCR[VRMASD]; LPCR=0x"
+                 TARGET_FMT_lx, lpcr);
+
+    return -1;
+}
+
 int ppc_hash64_handle_mmu_fault(PowerPCCPU *cpu, vaddr eaddr,
                                 int rwx, int mmu_idx)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
+    ppc_slb_t vrma_slbe;
     ppc_slb_t *slb;
     unsigned apshift;
     hwaddr ptex;
     ppc_hash_pte64_t pte;
     int exec_prot, pp_prot, amr_prot, prot;
-    uint64_t new_pte1;
     const int need_prot[] = {PAGE_READ, PAGE_WRITE, PAGE_EXEC};
     hwaddr raddr;
 
     assert((rwx == 0) || (rwx == 1) || (rwx == 2));
 
-    /* Note on LPCR usage: 970 uses HID4, but our special variant
-     * of store_spr copies relevant fields into env->spr[SPR_LPCR].
-     * Similarily we filter unimplemented bits when storing into
-     * LPCR depending on the MMU version. This code can thus just
-     * use the LPCR "as-is".
+    /*
+     * Note on LPCR usage: 970 uses HID4, but our special variant of
+     * store_spr copies relevant fields into env->spr[SPR_LPCR].
+     * Similarly we filter unimplemented bits when storing into LPCR
+     * depending on the MMU version. This code can thus just use the
+     * LPCR "as-is".
      */
 
     /* 1. Handle real mode accesses */
     if (((rwx == 2) && (msr_ir == 0)) || ((rwx != 2) && (msr_dr == 0))) {
-        /* Translation is supposedly "off"  */
-        /* In real mode the top 4 effective address bits are (mostly) ignored */
+        /*
+         * Translation is supposedly "off", but in real mode the top 4
+         * effective address bits are (mostly) ignored
+         */
         raddr = eaddr & 0x0FFFFFFFFFFFFFFFULL;
 
-        /* In HV mode, add HRMOR if top EA bit is clear */
-        if (msr_hv || !env->has_hv_mode) {
+        if (cpu->vhyp) {
+            /*
+             * In virtual hypervisor mode, there's nothing to do:
+             *   EA == GPA == qemu guest address
+             */
+        } else if (msr_hv || !env->has_hv_mode) {
+            /* In HV mode, add HRMOR if top EA bit is clear */
             if (!(eaddr >> 63)) {
                 raddr |= env->spr[SPR_HRMOR];
             }
-        } else {
-            /* Otherwise, check VPM for RMA vs VRMA */
-            if (env->spr[SPR_LPCR] & LPCR_VPM0) {
-                slb = &env->vrma_slb;
-                if (slb->sps) {
-                    goto skip_slb_search;
-                }
-                /* Not much else to do here */
+        } else if (ppc_hash64_use_vrma(env)) {
+            /* Emulated VRMA mode */
+            slb = &vrma_slbe;
+            if (build_vrma_slbe(cpu, slb) != 0) {
+                /* Invalid VRMA setup, machine check */
                 cs->exception_index = POWERPC_EXCP_MCHECK;
                 env->error_code = 0;
                 return 1;
-            } else if (raddr < env->rmls) {
-                /* RMA. Check bounds in RMLS */
-                raddr |= env->spr[SPR_RMOR];
-            } else {
-                /* The access failed, generate the approriate interrupt */
+            }
+
+            goto skip_slb_search;
+        } else {
+            target_ulong limit = rmls_limit(cpu);
+
+            /* Emulated old-style RMO mode, bounds check against RMLS */
+            if (raddr >= limit) {
                 if (rwx == 2) {
                     ppc_hash64_set_isi(cs, SRR1_PROTFAULT);
                 } else {
@@ -776,6 +933,8 @@ int ppc_hash64_handle_mmu_fault(PowerPCCPU *cpu, vaddr eaddr,
                 }
                 return 1;
             }
+
+            raddr |= env->spr[SPR_RMOR];
         }
         tlb_set_page(cs, eaddr & TARGET_PAGE_MASK, raddr & TARGET_PAGE_MASK,
                      PAGE_READ | PAGE_WRITE | PAGE_EXEC, mmu_idx,
@@ -870,17 +1029,19 @@ skip_slb_search:
 
     /* 6. Update PTE referenced and changed bits if necessary */
 
-    new_pte1 = pte.pte1 | HPTE64_R_R; /* set referenced bit */
-    if (rwx == 1) {
-        new_pte1 |= HPTE64_R_C; /* set changed (dirty) bit */
-    } else {
-        /* Treat the page as read-only for now, so that a later write
-         * will pass through this function again to set the C bit */
-        prot &= ~PAGE_WRITE;
+    if (!(pte.pte1 & HPTE64_R_R)) {
+        ppc_hash64_set_r(cpu, ptex, pte.pte1);
     }
-
-    if (new_pte1 != pte.pte1) {
-        ppc_hash64_store_hpte(cpu, ptex, pte.pte0, new_pte1);
+    if (!(pte.pte1 & HPTE64_R_C)) {
+        if (rwx == 1) {
+            ppc_hash64_set_c(cpu, ptex, pte.pte1);
+        } else {
+            /*
+             * Treat the page as read-only for now, so that a later write
+             * will pass through this function again to set the C bit
+             */
+            prot &= ~PAGE_WRITE;
+        }
     }
 
     /* 7. Determine the real address from the PTE */
@@ -896,6 +1057,7 @@ skip_slb_search:
 hwaddr ppc_hash64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr)
 {
     CPUPPCState *env = &cpu->env;
+    ppc_slb_t vrma_slbe;
     ppc_slb_t *slb;
     hwaddr ptex, raddr;
     ppc_hash_pte64_t pte;
@@ -906,22 +1068,29 @@ hwaddr ppc_hash64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr)
         /* In real mode the top 4 effective address bits are ignored */
         raddr = addr & 0x0FFFFFFFFFFFFFFFULL;
 
-        /* In HV mode, add HRMOR if top EA bit is clear */
-        if ((msr_hv || !env->has_hv_mode) && !(addr >> 63)) {
+        if (cpu->vhyp) {
+            /*
+             * In virtual hypervisor mode, there's nothing to do:
+             *   EA == GPA == qemu guest address
+             */
+            return raddr;
+        } else if ((msr_hv || !env->has_hv_mode) && !(addr >> 63)) {
+            /* In HV mode, add HRMOR if top EA bit is clear */
             return raddr | env->spr[SPR_HRMOR];
-        }
-
-        /* Otherwise, check VPM for RMA vs VRMA */
-        if (env->spr[SPR_LPCR] & LPCR_VPM0) {
-            slb = &env->vrma_slb;
-            if (!slb->sps) {
+        } else if (ppc_hash64_use_vrma(env)) {
+            /* Emulated VRMA mode */
+            slb = &vrma_slbe;
+            if (build_vrma_slbe(cpu, slb) != 0) {
                 return -1;
             }
-        } else if (raddr < env->rmls) {
-            /* RMA. Check bounds in RMLS */
-            return raddr | env->spr[SPR_RMOR];
         } else {
-            return -1;
+            target_ulong limit = rmls_limit(cpu);
+
+            /* Emulated old-style RMO mode, bounds check against RMLS */
+            if (raddr >= limit) {
+                return -1;
+            }
+            return raddr | env->spr[SPR_RMOR];
         }
     } else {
         slb = slb_lookup(cpu, addr);
@@ -939,24 +1108,6 @@ hwaddr ppc_hash64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr)
         & TARGET_PAGE_MASK;
 }
 
-void ppc_hash64_store_hpte(PowerPCCPU *cpu, hwaddr ptex,
-                           uint64_t pte0, uint64_t pte1)
-{
-    hwaddr base;
-    hwaddr offset = ptex * HASH_PTE_SIZE_64;
-
-    if (cpu->vhyp) {
-        PPCVirtualHypervisorClass *vhc =
-            PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
-        vhc->store_hpte(cpu->vhyp, ptex, pte0, pte1);
-        return;
-    }
-    base = ppc_hash64_hpt_base(cpu);
-
-    stq_phys(CPU(cpu)->as, base + offset, pte0);
-    stq_phys(CPU(cpu)->as, base + offset + HASH_PTE_SIZE_64 / 2, pte1);
-}
-
 void ppc_hash64_tlb_flush_hpte(PowerPCCPU *cpu, target_ulong ptex,
                                target_ulong pte0, target_ulong pte1)
 {
@@ -968,171 +1119,17 @@ void ppc_hash64_tlb_flush_hpte(PowerPCCPU *cpu, target_ulong ptex,
     cpu->env.tlb_need_flush = TLB_NEED_GLOBAL_FLUSH | TLB_NEED_LOCAL_FLUSH;
 }
 
-static void ppc_hash64_update_rmls(PowerPCCPU *cpu)
-{
-    CPUPPCState *env = &cpu->env;
-    uint64_t lpcr = env->spr[SPR_LPCR];
-
-    /*
-     * This is the full 4 bits encoding of POWER8. Previous
-     * CPUs only support a subset of these but the filtering
-     * is done when writing LPCR
-     */
-    switch ((lpcr & LPCR_RMLS) >> LPCR_RMLS_SHIFT) {
-    case 0x8: /* 32MB */
-        env->rmls = 0x2000000ull;
-        break;
-    case 0x3: /* 64MB */
-        env->rmls = 0x4000000ull;
-        break;
-    case 0x7: /* 128MB */
-        env->rmls = 0x8000000ull;
-        break;
-    case 0x4: /* 256MB */
-        env->rmls = 0x10000000ull;
-        break;
-    case 0x2: /* 1GB */
-        env->rmls = 0x40000000ull;
-        break;
-    case 0x1: /* 16GB */
-        env->rmls = 0x400000000ull;
-        break;
-    default:
-        /* What to do here ??? */
-        env->rmls = 0;
-    }
-}
-
-static void ppc_hash64_update_vrma(PowerPCCPU *cpu)
-{
-    CPUPPCState *env = &cpu->env;
-    const PPCHash64SegmentPageSizes *sps = NULL;
-    target_ulong esid, vsid, lpcr;
-    ppc_slb_t *slb = &env->vrma_slb;
-    uint32_t vrmasd;
-    int i;
-
-    /* First clear it */
-    slb->esid = slb->vsid = 0;
-    slb->sps = NULL;
-
-    /* Is VRMA enabled ? */
-    lpcr = env->spr[SPR_LPCR];
-    if (!(lpcr & LPCR_VPM0)) {
-        return;
-    }
-
-    /* Make one up. Mostly ignore the ESID which will not be
-     * needed for translation
-     */
-    vsid = SLB_VSID_VRMA;
-    vrmasd = (lpcr & LPCR_VRMASD) >> LPCR_VRMASD_SHIFT;
-    vsid |= (vrmasd << 4) & (SLB_VSID_L | SLB_VSID_LP);
-    esid = SLB_ESID_V;
-
-    for (i = 0; i < PPC_PAGE_SIZES_MAX_SZ; i++) {
-        const PPCHash64SegmentPageSizes *sps1 = &cpu->hash64_opts->sps[i];
-
-        if (!sps1->page_shift) {
-            break;
-        }
-
-        if ((vsid & SLB_VSID_LLP_MASK) == sps1->slb_enc) {
-            sps = sps1;
-            break;
-        }
-    }
-
-    if (!sps) {
-        error_report("Bad page size encoding esid 0x"TARGET_FMT_lx
-                     " vsid 0x"TARGET_FMT_lx, esid, vsid);
-        return;
-    }
-
-    slb->vsid = vsid;
-    slb->esid = esid;
-    slb->sps = sps;
-}
-
 void ppc_store_lpcr(PowerPCCPU *cpu, target_ulong val)
 {
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
     CPUPPCState *env = &cpu->env;
-    uint64_t lpcr = 0;
 
-    /* Filter out bits */
-    switch (env->mmu_model) {
-    case POWERPC_MMU_64B: /* 970 */
-        if (val & 0x40) {
-            lpcr |= LPCR_LPES0;
-        }
-        if (val & 0x8000000000000000ull) {
-            lpcr |= LPCR_LPES1;
-        }
-        if (val & 0x20) {
-            lpcr |= (0x4ull << LPCR_RMLS_SHIFT);
-        }
-        if (val & 0x4000000000000000ull) {
-            lpcr |= (0x2ull << LPCR_RMLS_SHIFT);
-        }
-        if (val & 0x2000000000000000ull) {
-            lpcr |= (0x1ull << LPCR_RMLS_SHIFT);
-        }
-        env->spr[SPR_RMOR] = ((lpcr >> 41) & 0xffffull) << 26;
-
-        /* XXX We could also write LPID from HID4 here
-         * but since we don't tag any translation on it
-         * it doesn't actually matter
-         */
-        /* XXX For proper emulation of 970 we also need
-         * to dig HRMOR out of HID5
-         */
-        break;
-    case POWERPC_MMU_2_03: /* P5p */
-        lpcr = val & (LPCR_RMLS | LPCR_ILE |
-                      LPCR_LPES0 | LPCR_LPES1 |
-                      LPCR_RMI | LPCR_HDICE);
-        break;
-    case POWERPC_MMU_2_06: /* P7 */
-        lpcr = val & (LPCR_VPM0 | LPCR_VPM1 | LPCR_ISL | LPCR_DPFD |
-                      LPCR_VRMASD | LPCR_RMLS | LPCR_ILE |
-                      LPCR_P7_PECE0 | LPCR_P7_PECE1 | LPCR_P7_PECE2 |
-                      LPCR_MER | LPCR_TC |
-                      LPCR_LPES0 | LPCR_LPES1 | LPCR_HDICE);
-        break;
-    case POWERPC_MMU_2_07: /* P8 */
-        lpcr = val & (LPCR_VPM0 | LPCR_VPM1 | LPCR_ISL | LPCR_KBV |
-                      LPCR_DPFD | LPCR_VRMASD | LPCR_RMLS | LPCR_ILE |
-                      LPCR_AIL | LPCR_ONL | LPCR_P8_PECE0 | LPCR_P8_PECE1 |
-                      LPCR_P8_PECE2 | LPCR_P8_PECE3 | LPCR_P8_PECE4 |
-                      LPCR_MER | LPCR_TC | LPCR_LPES0 | LPCR_HDICE);
-        break;
-    case POWERPC_MMU_3_00: /* P9 */
-        lpcr = val & (LPCR_VPM1 | LPCR_ISL | LPCR_KBV | LPCR_DPFD |
-                      (LPCR_PECE_U_MASK & LPCR_HVEE) | LPCR_ILE | LPCR_AIL |
-                      LPCR_UPRT | LPCR_EVIRT | LPCR_ONL | LPCR_HR | LPCR_LD |
-                      (LPCR_PECE_L_MASK & (LPCR_PDEE | LPCR_HDEE | LPCR_EEE |
-                      LPCR_DEE | LPCR_OEE)) | LPCR_MER | LPCR_GTSE | LPCR_TC |
-                      LPCR_HEIC | LPCR_LPES0 | LPCR_HVICE | LPCR_HDICE);
-        /*
-         * If we have a virtual hypervisor, we need to bring back RMLS. It
-         * doesn't exist on an actual P9 but that's all we know how to
-         * configure with softmmu at the moment
-         */
-        if (cpu->vhyp) {
-            lpcr |= (val & LPCR_RMLS);
-        }
-        break;
-    default:
-        ;
-    }
-    env->spr[SPR_LPCR] = lpcr;
-    ppc_hash64_update_rmls(cpu);
-    ppc_hash64_update_vrma(cpu);
+    env->spr[SPR_LPCR] = val & pcc->lpcr_mask;
 }
 
 void helper_store_lpcr(CPUPPCState *env, target_ulong val)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
 
     ppc_store_lpcr(cpu, val);
 }

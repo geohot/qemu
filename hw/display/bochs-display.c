@@ -4,10 +4,13 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
+
 #include "qemu/osdep.h"
+#include "qemu/module.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "hw/display/bochs-vbe.h"
 #include "hw/display/edid.h"
 
@@ -15,6 +18,7 @@
 
 #include "ui/console.h"
 #include "ui/qemu-pixman.h"
+#include "qom/object.h"
 
 typedef struct BochsDisplayMode {
     pixman_format_code_t format;
@@ -26,7 +30,7 @@ typedef struct BochsDisplayMode {
     uint64_t             size;
 } BochsDisplayMode;
 
-typedef struct BochsDisplayState {
+struct BochsDisplayState {
     /* parent */
     PCIDevice        pci;
 
@@ -50,11 +54,10 @@ typedef struct BochsDisplayState {
 
     /* device state */
     BochsDisplayMode mode;
-} BochsDisplayState;
+};
 
 #define TYPE_BOCHS_DISPLAY "bochs-display"
-#define BOCHS_DISPLAY(obj) OBJECT_CHECK(BochsDisplayState, (obj), \
-                                        TYPE_BOCHS_DISPLAY)
+OBJECT_DECLARE_SIMPLE_TYPE(BochsDisplayState, BOCHS_DISPLAY)
 
 static const VMStateDescription vmstate_bochs_display = {
     .name = "bochs-display",
@@ -249,6 +252,8 @@ static void bochs_display_update(void *opaque)
             dpy_gfx_update(s->con, 0, ys,
                            mode.width, y - ys);
         }
+
+        g_free(snap);
     }
 }
 
@@ -262,15 +267,17 @@ static void bochs_display_realize(PCIDevice *dev, Error **errp)
     Object *obj = OBJECT(dev);
     int ret;
 
-    s->con = graphic_console_init(DEVICE(dev), 0, &bochs_display_gfx_ops, s);
-
     if (s->vgamem < 4 * MiB) {
         error_setg(errp, "bochs-display: video memory too small");
+        return;
     }
     if (s->vgamem > 256 * MiB) {
         error_setg(errp, "bochs-display: video memory too big");
+        return;
     }
     s->vgamem = pow2ceil(s->vgamem);
+
+    s->con = graphic_console_init(DEVICE(dev), 0, &bochs_display_gfx_ops, s);
 
     memory_region_init_ram(&s->vram, obj, "bochs-display-vram", s->vgamem,
                            &error_fatal);
@@ -279,8 +286,8 @@ static void bochs_display_realize(PCIDevice *dev, Error **errp)
     memory_region_init_io(&s->qext, obj, &bochs_display_qext_ops, s,
                           "qemu extended regs", PCI_VGA_QEXT_SIZE);
 
-    memory_region_init(&s->mmio, obj, "bochs-display-mmio",
-                       PCI_VGA_MMIO_SIZE);
+    memory_region_init_io(&s->mmio, obj, &unassigned_io_ops, NULL,
+                          "bochs-display-mmio", PCI_VGA_MMIO_SIZE);
     memory_region_add_subregion(&s->mmio, PCI_VGA_BOCHS_OFFSET, &s->vbe);
     memory_region_add_subregion(&s->mmio, PCI_VGA_QEXT_OFFSET, &s->qext);
 
@@ -295,9 +302,10 @@ static void bochs_display_realize(PCIDevice *dev, Error **errp)
     }
 
     if (pci_bus_is_express(pci_get_bus(dev))) {
-        dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
         ret = pcie_endpoint_cap_init(dev, 0x80);
         assert(ret > 0);
+    } else {
+        dev->cap_present &= ~QEMU_PCI_CAP_EXPRESS;
     }
 
     memory_region_set_log(&s->vram, true, DIRTY_MEMORY_VGA);
@@ -320,11 +328,14 @@ static void bochs_display_set_big_endian_fb(Object *obj, bool value,
 
 static void bochs_display_init(Object *obj)
 {
+    PCIDevice *dev = PCI_DEVICE(obj);
+
     /* Expose framebuffer byteorder via QOM */
     object_property_add_bool(obj, "big-endian-framebuffer",
                              bochs_display_get_big_endian_fb,
-                             bochs_display_set_big_endian_fb,
-                             NULL);
+                             bochs_display_set_big_endian_fb);
+
+    dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
 }
 
 static void bochs_display_exit(PCIDevice *dev)
@@ -336,7 +347,7 @@ static void bochs_display_exit(PCIDevice *dev)
 
 static Property bochs_display_properties[] = {
     DEFINE_PROP_SIZE("vgamem", BochsDisplayState, vgamem, 16 * MiB),
-    DEFINE_PROP_BOOL("edid", BochsDisplayState, enable_edid, false),
+    DEFINE_PROP_BOOL("edid", BochsDisplayState, enable_edid, true),
     DEFINE_EDID_PROPERTIES(BochsDisplayState, edid_info),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -354,7 +365,7 @@ static void bochs_display_class_init(ObjectClass *klass, void *data)
     k->romfile   = "vgabios-bochs-display.bin";
     k->exit      = bochs_display_exit;
     dc->vmsd     = &vmstate_bochs_display;
-    dc->props    = bochs_display_properties;
+    device_class_set_props(dc, bochs_display_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 

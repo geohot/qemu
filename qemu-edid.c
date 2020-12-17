@@ -5,12 +5,14 @@
  * See the COPYING file in the top-level directory.
  */
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/bswap.h"
 #include "qemu/cutils.h"
 #include "hw/display/edid.h"
 
-static qemu_edid_info info;
+static qemu_edid_info info = {
+    .prefx = 1024,
+    .prefy = 768,
+};
 
 static void usage(FILE *out)
 {
@@ -40,6 +42,7 @@ int main(int argc, char *argv[])
 {
     FILE *outfile = NULL;
     uint8_t blob[256];
+    uint32_t dpi = 100;
     int rc;
 
     for (;;) {
@@ -84,7 +87,7 @@ int main(int argc, char *argv[])
             }
             break;
         case 'd':
-            if (qemu_strtoui(optarg, NULL, 10, &info.dpi) < 0) {
+            if (qemu_strtoui(optarg, NULL, 10, &dpi) < 0) {
                 fprintf(stderr, "not a number: %s\n", optarg);
                 exit(1);
             }
@@ -110,6 +113,9 @@ int main(int argc, char *argv[])
     if (outfile == NULL) {
         outfile = stdout;
     }
+
+    info.width_mm = qemu_edid_dpi_to_mm(dpi, info.prefx);
+    info.height_mm = qemu_edid_dpi_to_mm(dpi, info.prefy);
 
     memset(blob, 0, sizeof(blob));
     qemu_edid_generate(blob, sizeof(blob), &info);

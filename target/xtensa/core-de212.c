@@ -28,20 +28,19 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/gdbstub.h"
-#include "qemu-common.h"
 #include "qemu/host-utils.h"
 
 #include "core-de212/core-isa.h"
 #include "overlay_tool.h"
 
 #define xtensa_modules xtensa_modules_de212
-#include "core-de212/xtensa-modules.inc.c"
+#include "core-de212/xtensa-modules.c.inc"
 
 static XtensaConfig de212 __attribute__((unused)) = {
     .name = "de212",
     .gdb_regmap = {
         .reg = {
-#include "core-de212/gdb-config.inc.c"
+#include "core-de212/gdb-config.c.inc"
         }
     },
     .isa_internal = &xtensa_modules,

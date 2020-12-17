@@ -23,10 +23,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "qapi/error.h"
 #include "tap_int.h"
 #include "qemu/cutils.h"
-#include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
 
 #if defined(__NetBSD__) || defined(__FreeBSD__)
@@ -211,7 +211,7 @@ void tap_set_sndbuf(int fd, const NetdevTapOptions *tap, Error **errp)
 {
 }
 
-int tap_probe_vnet_hdr(int fd)
+int tap_probe_vnet_hdr(int fd, Error **errp)
 {
     return 0;
 }

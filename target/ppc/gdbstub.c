@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,7 +18,6 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "exec/gdbstub.h"
 
@@ -33,14 +32,14 @@ static int ppc_gdb_register_len_apple(int n)
         return 8;
     case 64 ... 95:
         return 16;
-    case 64+32: /* nip */
-    case 65+32: /* msr */
-    case 67+32: /* lr */
-    case 68+32: /* ctr */
-    case 70+32: /* fpscr */
+    case 64 + 32: /* nip */
+    case 65 + 32: /* msr */
+    case 67 + 32: /* lr */
+    case 68 + 32: /* ctr */
+    case 70 + 32: /* fpscr */
         return 8;
-    case 66+32: /* cr */
-    case 69+32: /* xer */
+    case 66 + 32: /* cr */
+    case 69 + 32: /* xer */
         return 4;
     default:
         return 0;
@@ -84,11 +83,14 @@ static int ppc_gdb_register_len(int n)
     }
 }
 
-/* We need to present the registers to gdb in the "current" memory ordering.
-   For user-only mode we get this for free; TARGET_WORDS_BIGENDIAN is set to
-   the proper ordering for the binary, and cannot be changed.
-   For system mode, TARGET_WORDS_BIGENDIAN is always set, and we must check
-   the current mode of the chip to see if we're running in little-endian.  */
+/*
+ * We need to present the registers to gdb in the "current" memory
+ * ordering.  For user-only mode we get this for free;
+ * TARGET_WORDS_BIGENDIAN is set to the proper ordering for the
+ * binary, and cannot be changed.  For system mode,
+ * TARGET_WORDS_BIGENDIAN is always set, and we must check the current
+ * mode of the chip to see if we're running in little-endian.
+ */
 void ppc_maybe_bswap_register(CPUPPCState *env, uint8_t *mem_buf, int len)
 {
 #ifndef CONFIG_USER_ONLY
@@ -104,17 +106,19 @@ void ppc_maybe_bswap_register(CPUPPCState *env, uint8_t *mem_buf, int len)
 #endif
 }
 
-/* Old gdb always expects FP registers.  Newer (xml-aware) gdb only
+/*
+ * Old gdb always expects FP registers.  Newer (xml-aware) gdb only
  * expects whatever the target description contains.  Due to a
  * historical mishap the FP registers appear in between core integer
- * regs and PC, MSR, CR, and so forth.  We hack round this by giving the
- * FP regs zero size when talking to a newer gdb.
+ * regs and PC, MSR, CR, and so forth.  We hack round this by giving
+ * the FP regs zero size when talking to a newer gdb.
  */
 
-int ppc_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
+int ppc_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int n)
 {
     PowerPCCPU *cpu = POWERPC_CPU(cs);
     CPUPPCState *env = &cpu->env;
+    uint8_t *mem_buf;
     int r = ppc_gdb_register_len(n);
 
     if (!r) {
@@ -123,17 +127,17 @@ int ppc_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
 
     if (n < 32) {
         /* gprs */
-        gdb_get_regl(mem_buf, env->gpr[n]);
+        gdb_get_regl(buf, env->gpr[n]);
     } else if (n < 64) {
         /* fprs */
-        stfq_p(mem_buf, *cpu_fpr_ptr(env, n - 32));
+        gdb_get_float64(buf, *cpu_fpr_ptr(env, n - 32));
     } else {
         switch (n) {
         case 64:
-            gdb_get_regl(mem_buf, env->nip);
+            gdb_get_regl(buf, env->nip);
             break;
         case 65:
-            gdb_get_regl(mem_buf, env->msr);
+            gdb_get_regl(buf, env->msr);
             break;
         case 66:
             {
@@ -142,31 +146,33 @@ int ppc_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
                 for (i = 0; i < 8; i++) {
                     cr |= env->crf[i] << (32 - ((i + 1) * 4));
                 }
-                gdb_get_reg32(mem_buf, cr);
+                gdb_get_reg32(buf, cr);
                 break;
             }
         case 67:
-            gdb_get_regl(mem_buf, env->lr);
+            gdb_get_regl(buf, env->lr);
             break;
         case 68:
-            gdb_get_regl(mem_buf, env->ctr);
+            gdb_get_regl(buf, env->ctr);
             break;
         case 69:
-            gdb_get_reg32(mem_buf, env->xer);
+            gdb_get_reg32(buf, env->xer);
             break;
         case 70:
-            gdb_get_reg32(mem_buf, env->fpscr);
+            gdb_get_reg32(buf, env->fpscr);
             break;
         }
     }
+    mem_buf = buf->data + buf->len - r;
     ppc_maybe_bswap_register(env, mem_buf, r);
     return r;
 }
 
-int ppc_cpu_gdb_read_register_apple(CPUState *cs, uint8_t *mem_buf, int n)
+int ppc_cpu_gdb_read_register_apple(CPUState *cs, GByteArray *buf, int n)
 {
     PowerPCCPU *cpu = POWERPC_CPU(cs);
     CPUPPCState *env = &cpu->env;
+    uint8_t *mem_buf;
     int r = ppc_gdb_register_len_apple(n);
 
     if (!r) {
@@ -175,21 +181,21 @@ int ppc_cpu_gdb_read_register_apple(CPUState *cs, uint8_t *mem_buf, int n)
 
     if (n < 32) {
         /* gprs */
-        gdb_get_reg64(mem_buf, env->gpr[n]);
+        gdb_get_reg64(buf, env->gpr[n]);
     } else if (n < 64) {
         /* fprs */
-        stfq_p(mem_buf, *cpu_fpr_ptr(env, n - 32));
+        gdb_get_float64(buf, *cpu_fpr_ptr(env, n - 32));
     } else if (n < 96) {
         /* Altivec */
-        stq_p(mem_buf, n - 64);
-        stq_p(mem_buf + 8, 0);
+        gdb_get_reg64(buf, n - 64);
+        gdb_get_reg64(buf, 0);
     } else {
         switch (n) {
         case 64 + 32:
-            gdb_get_reg64(mem_buf, env->nip);
+            gdb_get_reg64(buf, env->nip);
             break;
         case 65 + 32:
-            gdb_get_reg64(mem_buf, env->msr);
+            gdb_get_reg64(buf, env->msr);
             break;
         case 66 + 32:
             {
@@ -198,23 +204,24 @@ int ppc_cpu_gdb_read_register_apple(CPUState *cs, uint8_t *mem_buf, int n)
                 for (i = 0; i < 8; i++) {
                     cr |= env->crf[i] << (32 - ((i + 1) * 4));
                 }
-                gdb_get_reg32(mem_buf, cr);
+                gdb_get_reg32(buf, cr);
                 break;
             }
         case 67 + 32:
-            gdb_get_reg64(mem_buf, env->lr);
+            gdb_get_reg64(buf, env->lr);
             break;
         case 68 + 32:
-            gdb_get_reg64(mem_buf, env->ctr);
+            gdb_get_reg64(buf, env->ctr);
             break;
         case 69 + 32:
-            gdb_get_reg32(mem_buf, env->xer);
+            gdb_get_reg32(buf, env->xer);
             break;
         case 70 + 32:
-            gdb_get_reg64(mem_buf, env->fpscr);
+            gdb_get_reg64(buf, env->fpscr);
             break;
         }
     }
+    mem_buf = buf->data + buf->len - r;
     ppc_maybe_bswap_register(env, mem_buf, r);
     return r;
 }

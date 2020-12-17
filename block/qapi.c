@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "block/qapi.h"
 #include "block/block_int.h"
 #include "block/throttle-groups.h"
@@ -36,14 +37,17 @@
 #include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qnum.h"
 #include "qapi/qmp/qstring.h"
+#include "qemu/qemu-print.h"
 #include "sysemu/block-backend.h"
 #include "qemu/cutils.h"
 
 BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
-                                        BlockDriverState *bs, Error **errp)
+                                        BlockDriverState *bs,
+                                        bool flat,
+                                        Error **errp)
 {
     ImageInfo **p_image_info;
-    BlockDriverState *bs0;
+    BlockDriverState *bs0, *backing;
     BlockDeviceInfo *info;
 
     if (!bs->drv) {
@@ -72,9 +76,15 @@ BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
         info->node_name = g_strdup(bs->node_name);
     }
 
-    if (bs->backing_file[0]) {
+    backing = bdrv_cow_bs(bs);
+    if (backing) {
         info->has_backing_file = true;
-        info->backing_file = g_strdup(bs->backing_file);
+        info->backing_file = g_strdup(backing->filename);
+    }
+
+    if (!QLIST_EMPTY(&bs->dirty_bitmaps)) {
+        info->has_dirty_bitmaps = true;
+        info->dirty_bitmaps = bdrv_query_dirty_bitmaps(bs);
     }
 
     info->detect_zeroes = bs->detect_zeroes;
@@ -149,9 +159,18 @@ BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
             return NULL;
         }
 
-        if (bs0->drv && bs0->backing) {
+        /* stop gathering data for flat output */
+        if (flat) {
+            break;
+        }
+
+        if (bs0->drv && bdrv_filter_or_cow_child(bs0)) {
+            /*
+             * Put any filtered child here (for backwards compatibility to when
+             * we put bs0->backing here, which might be any filtered child).
+             */
             info->backing_file_depth++;
-            bs0 = bs0->backing->bs;
+            bs0 = bdrv_filter_or_cow_bs(bs0);
             (*p_image_info)->has_backing_image = true;
             p_image_info = &((*p_image_info)->backing_image);
         } else {
@@ -160,9 +179,8 @@ BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
 
         /* Skip automatically inserted nodes that the user isn't aware of for
          * query-block (blk != NULL), but not for query-named-block-nodes */
-        while (blk && bs0->drv && bs0->implicit) {
-            bs0 = backing_bs(bs0);
-            assert(bs0);
+        if (blk) {
+            bs0 = bdrv_skip_implicit_filters(bs0);
         }
     }
 
@@ -212,6 +230,8 @@ int bdrv_query_snapshot_info_list(BlockDriverState *bs,
         info->date_nsec     = sn_tab[i].date_nsec;
         info->vm_clock_sec  = sn_tab[i].vm_clock_nsec / 1000000000;
         info->vm_clock_nsec = sn_tab[i].vm_clock_nsec % 1000000000;
+        info->icount        = sn_tab[i].icount;
+        info->has_icount    = sn_tab[i].icount != -1ULL;
 
         info_list = g_new0(SnapshotInfoList, 1);
         info_list->value = info;
@@ -274,7 +294,7 @@ void bdrv_query_image_info(BlockDriverState *bs,
     info->virtual_size    = size;
     info->actual_size     = bdrv_get_allocated_file_size(bs);
     info->has_actual_size = info->actual_size >= 0;
-    if (bdrv_is_encrypted(bs)) {
+    if (bs->encrypted) {
         info->encrypted = true;
         info->has_encrypted = true;
     }
@@ -297,6 +317,7 @@ void bdrv_query_image_info(BlockDriverState *bs,
     backing_filename = bs->backing_file;
     if (backing_filename[0] != '\0') {
         char *backing_filename2;
+
         info->backing_filename = g_strdup(backing_filename);
         info->has_backing_filename = true;
         backing_filename2 = bdrv_get_full_backing_filename(bs, NULL);
@@ -348,9 +369,7 @@ static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
     char *qdev;
 
     /* Skip automatically inserted nodes that the user isn't aware of */
-    while (bs && bs->drv && bs->implicit) {
-        bs = backing_bs(bs);
-    }
+    bs = bdrv_skip_implicit_filters(bs);
 
     info->device = g_strdup(blk_name(blk));
     info->type = g_strdup("unknown");
@@ -382,7 +401,7 @@ static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
 
     if (bs && bs->drv) {
         info->has_inserted = true;
-        info->inserted = bdrv_block_device_info(blk, bs, errp);
+        info->inserted = bdrv_block_device_info(blk, bs, false, errp);
         if (info->inserted == NULL) {
             goto err;
         }
@@ -433,24 +452,30 @@ static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
 
     ds->rd_bytes = stats->nr_bytes[BLOCK_ACCT_READ];
     ds->wr_bytes = stats->nr_bytes[BLOCK_ACCT_WRITE];
+    ds->unmap_bytes = stats->nr_bytes[BLOCK_ACCT_UNMAP];
     ds->rd_operations = stats->nr_ops[BLOCK_ACCT_READ];
     ds->wr_operations = stats->nr_ops[BLOCK_ACCT_WRITE];
+    ds->unmap_operations = stats->nr_ops[BLOCK_ACCT_UNMAP];
 
     ds->failed_rd_operations = stats->failed_ops[BLOCK_ACCT_READ];
     ds->failed_wr_operations = stats->failed_ops[BLOCK_ACCT_WRITE];
     ds->failed_flush_operations = stats->failed_ops[BLOCK_ACCT_FLUSH];
+    ds->failed_unmap_operations = stats->failed_ops[BLOCK_ACCT_UNMAP];
 
     ds->invalid_rd_operations = stats->invalid_ops[BLOCK_ACCT_READ];
     ds->invalid_wr_operations = stats->invalid_ops[BLOCK_ACCT_WRITE];
     ds->invalid_flush_operations =
         stats->invalid_ops[BLOCK_ACCT_FLUSH];
+    ds->invalid_unmap_operations = stats->invalid_ops[BLOCK_ACCT_UNMAP];
 
     ds->rd_merged = stats->merged[BLOCK_ACCT_READ];
     ds->wr_merged = stats->merged[BLOCK_ACCT_WRITE];
+    ds->unmap_merged = stats->merged[BLOCK_ACCT_UNMAP];
     ds->flush_operations = stats->nr_ops[BLOCK_ACCT_FLUSH];
     ds->wr_total_time_ns = stats->total_time_ns[BLOCK_ACCT_WRITE];
     ds->rd_total_time_ns = stats->total_time_ns[BLOCK_ACCT_READ];
     ds->flush_total_time_ns = stats->total_time_ns[BLOCK_ACCT_FLUSH];
+    ds->unmap_total_time_ns = stats->total_time_ns[BLOCK_ACCT_UNMAP];
 
     ds->has_idle_time_ns = stats->last_access_time_ns > 0;
     if (ds->has_idle_time_ns) {
@@ -506,6 +531,8 @@ static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
 static BlockStats *bdrv_query_bds_stats(BlockDriverState *bs,
                                         bool blk_level)
 {
+    BdrvChild *parent_child;
+    BlockDriverState *filter_or_cow_bs;
     BlockStats *s = NULL;
 
     s = g_malloc0(sizeof(*s));
@@ -518,9 +545,8 @@ static BlockStats *bdrv_query_bds_stats(BlockDriverState *bs,
     /* Skip automatically inserted nodes that the user isn't aware of in
      * a BlockBackend-level command. Stay at the exact node for a node-level
      * command. */
-    while (blk_level && bs->drv && bs->implicit) {
-        bs = backing_bs(bs);
-        assert(bs);
+    if (blk_level) {
+        bs = bdrv_skip_implicit_filters(bs);
     }
 
     if (bdrv_get_node_name(bs)[0]) {
@@ -530,14 +556,51 @@ static BlockStats *bdrv_query_bds_stats(BlockDriverState *bs,
 
     s->stats->wr_highest_offset = stat64_get(&bs->wr_highest_offset);
 
-    if (bs->file) {
-        s->has_parent = true;
-        s->parent = bdrv_query_bds_stats(bs->file->bs, blk_level);
+    s->driver_specific = bdrv_get_specific_stats(bs);
+    if (s->driver_specific) {
+        s->has_driver_specific = true;
     }
 
-    if (blk_level && bs->backing) {
+    parent_child = bdrv_primary_child(bs);
+    if (!parent_child ||
+        !(parent_child->role & (BDRV_CHILD_DATA | BDRV_CHILD_FILTERED)))
+    {
+        BdrvChild *c;
+
+        /*
+         * Look for a unique data-storing child.  We do not need to look for
+         * filtered children, as there would be only one and it would have been
+         * the primary child.
+         */
+        parent_child = NULL;
+        QLIST_FOREACH(c, &bs->children, next) {
+            if (c->role & BDRV_CHILD_DATA) {
+                if (parent_child) {
+                    /*
+                     * There are multiple data-storing children and we cannot
+                     * choose between them.
+                     */
+                    parent_child = NULL;
+                    break;
+                }
+                parent_child = c;
+            }
+        }
+    }
+    if (parent_child) {
+        s->has_parent = true;
+        s->parent = bdrv_query_bds_stats(parent_child->bs, blk_level);
+    }
+
+    filter_or_cow_bs = bdrv_filter_or_cow_bs(bs);
+    if (blk_level && filter_or_cow_bs) {
+        /*
+         * Put any filtered or COW child here (for backwards
+         * compatibility to when we put bs0->backing here, which might
+         * be either)
+         */
         s->has_backing = true;
-        s->backing = bdrv_query_bds_stats(bs->backing->bs, blk_level);
+        s->backing = bdrv_query_bds_stats(filter_or_cow_bs, blk_level);
     }
 
     return s;
@@ -630,48 +693,18 @@ BlockStatsList *qmp_query_blockstats(bool has_query_nodes,
     return head;
 }
 
-#define NB_SUFFIXES 4
-
-static char *get_human_readable_size(char *buf, int buf_size, int64_t size)
+void bdrv_snapshot_dump(QEMUSnapshotInfo *sn)
 {
-    static const char suffixes[NB_SUFFIXES] = {'K', 'M', 'G', 'T'};
-    int64_t base;
-    int i;
-
-    if (size <= 999) {
-        snprintf(buf, buf_size, "%" PRId64, size);
-    } else {
-        base = 1024;
-        for (i = 0; i < NB_SUFFIXES; i++) {
-            if (size < (10 * base)) {
-                snprintf(buf, buf_size, "%0.1f%c",
-                         (double)size / base,
-                         suffixes[i]);
-                break;
-            } else if (size < (1000 * base) || i == (NB_SUFFIXES - 1)) {
-                snprintf(buf, buf_size, "%" PRId64 "%c",
-                         ((size + (base >> 1)) / base),
-                         suffixes[i]);
-                break;
-            }
-            base = base * 1024;
-        }
-    }
-    return buf;
-}
-
-void bdrv_snapshot_dump(fprintf_function func_fprintf, void *f,
-                        QEMUSnapshotInfo *sn)
-{
-    char buf1[128], date_buf[128], clock_buf[128];
+    char date_buf[128], clock_buf[128];
+    char icount_buf[128] = {0};
     struct tm tm;
     time_t ti;
     int64_t secs;
+    char *sizing = NULL;
 
     if (!sn) {
-        func_fprintf(f,
-                     "%-10s%-20s%7s%20s%15s",
-                     "ID", "TAG", "VM SIZE", "DATE", "VM CLOCK");
+        qemu_printf("%-10s%-18s%7s%20s%13s%11s",
+                    "ID", "TAG", "VM SIZE", "DATE", "VM CLOCK", "ICOUNT");
     } else {
         ti = sn->date_sec;
         localtime_r(&ti, &tm);
@@ -684,50 +717,52 @@ void bdrv_snapshot_dump(fprintf_function func_fprintf, void *f,
                  (int)((secs / 60) % 60),
                  (int)(secs % 60),
                  (int)((sn->vm_clock_nsec / 1000000) % 1000));
-        func_fprintf(f,
-                     "%-10s%-20s%7s%20s%15s",
-                     sn->id_str, sn->name,
-                     get_human_readable_size(buf1, sizeof(buf1),
-                                             sn->vm_state_size),
-                     date_buf,
-                     clock_buf);
+        sizing = size_to_str(sn->vm_state_size);
+        if (sn->icount != -1ULL) {
+            snprintf(icount_buf, sizeof(icount_buf),
+                "%"PRId64, sn->icount);
+        }
+        qemu_printf("%-9s %-17s %7s%20s%13s%11s",
+                    sn->id_str, sn->name,
+                    sizing,
+                    date_buf,
+                    clock_buf,
+                    icount_buf);
     }
+    g_free(sizing);
 }
 
-static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
-                       QDict *dict);
-static void dump_qlist(fprintf_function func_fprintf, void *f, int indentation,
-                       QList *list);
+static void dump_qdict(int indentation, QDict *dict);
+static void dump_qlist(int indentation, QList *list);
 
-static void dump_qobject(fprintf_function func_fprintf, void *f,
-                         int comp_indent, QObject *obj)
+static void dump_qobject(int comp_indent, QObject *obj)
 {
     switch (qobject_type(obj)) {
         case QTYPE_QNUM: {
             QNum *value = qobject_to(QNum, obj);
             char *tmp = qnum_to_string(value);
-            func_fprintf(f, "%s", tmp);
+            qemu_printf("%s", tmp);
             g_free(tmp);
             break;
         }
         case QTYPE_QSTRING: {
             QString *value = qobject_to(QString, obj);
-            func_fprintf(f, "%s", qstring_get_str(value));
+            qemu_printf("%s", qstring_get_str(value));
             break;
         }
         case QTYPE_QDICT: {
             QDict *value = qobject_to(QDict, obj);
-            dump_qdict(func_fprintf, f, comp_indent, value);
+            dump_qdict(comp_indent, value);
             break;
         }
         case QTYPE_QLIST: {
             QList *value = qobject_to(QList, obj);
-            dump_qlist(func_fprintf, f, comp_indent, value);
+            dump_qlist(comp_indent, value);
             break;
         }
         case QTYPE_QBOOL: {
             QBool *value = qobject_to(QBool, obj);
-            func_fprintf(f, "%s", qbool_get_bool(value) ? "true" : "false");
+            qemu_printf("%s", qbool_get_bool(value) ? "true" : "false");
             break;
         }
         default:
@@ -735,8 +770,7 @@ static void dump_qobject(fprintf_function func_fprintf, void *f,
     }
 }
 
-static void dump_qlist(fprintf_function func_fprintf, void *f, int indentation,
-                       QList *list)
+static void dump_qlist(int indentation, QList *list)
 {
     const QListEntry *entry;
     int i = 0;
@@ -744,17 +778,16 @@ static void dump_qlist(fprintf_function func_fprintf, void *f, int indentation,
     for (entry = qlist_first(list); entry; entry = qlist_next(entry), i++) {
         QType type = qobject_type(entry->value);
         bool composite = (type == QTYPE_QDICT || type == QTYPE_QLIST);
-        func_fprintf(f, "%*s[%i]:%c", indentation * 4, "", i,
-                     composite ? '\n' : ' ');
-        dump_qobject(func_fprintf, f, indentation + 1, entry->value);
+        qemu_printf("%*s[%i]:%c", indentation * 4, "", i,
+                    composite ? '\n' : ' ');
+        dump_qobject(indentation + 1, entry->value);
         if (!composite) {
-            func_fprintf(f, "\n");
+            qemu_printf("\n");
         }
     }
 }
 
-static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
-                       QDict *dict)
+static void dump_qdict(int indentation, QDict *dict)
 {
     const QDictEntry *entry;
 
@@ -769,18 +802,17 @@ static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
             key[i] = entry->key[i] == '-' ? ' ' : entry->key[i];
         }
         key[i] = 0;
-        func_fprintf(f, "%*s%s:%c", indentation * 4, "", key,
-                     composite ? '\n' : ' ');
-        dump_qobject(func_fprintf, f, indentation + 1, entry->value);
+        qemu_printf("%*s%s:%c", indentation * 4, "", key,
+                    composite ? '\n' : ' ');
+        dump_qobject(indentation + 1, entry->value);
         if (!composite) {
-            func_fprintf(f, "\n");
+            qemu_printf("\n");
         }
         g_free(key);
     }
 }
 
-void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
-                                   ImageInfoSpecific *info_spec)
+void bdrv_image_info_specific_dump(ImageInfoSpecific *info_spec)
 {
     QObject *obj, *data;
     Visitor *v = qobject_output_visitor_new(&obj);
@@ -788,65 +820,64 @@ void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
     visit_type_ImageInfoSpecific(v, NULL, &info_spec, &error_abort);
     visit_complete(v, &obj);
     data = qdict_get(qobject_to(QDict, obj), "data");
-    dump_qobject(func_fprintf, f, 1, data);
+    dump_qobject(1, data);
     qobject_unref(obj);
     visit_free(v);
 }
 
-void bdrv_image_info_dump(fprintf_function func_fprintf, void *f,
-                          ImageInfo *info)
+void bdrv_image_info_dump(ImageInfo *info)
 {
-    char size_buf[128], dsize_buf[128];
+    char *size_buf, *dsize_buf;
     if (!info->has_actual_size) {
-        snprintf(dsize_buf, sizeof(dsize_buf), "unavailable");
+        dsize_buf = g_strdup("unavailable");
     } else {
-        get_human_readable_size(dsize_buf, sizeof(dsize_buf),
-                                info->actual_size);
+        dsize_buf = size_to_str(info->actual_size);
     }
-    get_human_readable_size(size_buf, sizeof(size_buf), info->virtual_size);
-    func_fprintf(f,
-                 "image: %s\n"
-                 "file format: %s\n"
-                 "virtual size: %s (%" PRId64 " bytes)\n"
-                 "disk size: %s\n",
-                 info->filename, info->format, size_buf,
-                 info->virtual_size,
-                 dsize_buf);
+    size_buf = size_to_str(info->virtual_size);
+    qemu_printf("image: %s\n"
+                "file format: %s\n"
+                "virtual size: %s (%" PRId64 " bytes)\n"
+                "disk size: %s\n",
+                info->filename, info->format, size_buf,
+                info->virtual_size,
+                dsize_buf);
+    g_free(size_buf);
+    g_free(dsize_buf);
 
     if (info->has_encrypted && info->encrypted) {
-        func_fprintf(f, "encrypted: yes\n");
+        qemu_printf("encrypted: yes\n");
     }
 
     if (info->has_cluster_size) {
-        func_fprintf(f, "cluster_size: %" PRId64 "\n",
-                       info->cluster_size);
+        qemu_printf("cluster_size: %" PRId64 "\n",
+                    info->cluster_size);
     }
 
     if (info->has_dirty_flag && info->dirty_flag) {
-        func_fprintf(f, "cleanly shut down: no\n");
+        qemu_printf("cleanly shut down: no\n");
     }
 
     if (info->has_backing_filename) {
-        func_fprintf(f, "backing file: %s", info->backing_filename);
+        qemu_printf("backing file: %s", info->backing_filename);
         if (!info->has_full_backing_filename) {
-            func_fprintf(f, " (cannot determine actual path)");
+            qemu_printf(" (cannot determine actual path)");
         } else if (strcmp(info->backing_filename,
                           info->full_backing_filename) != 0) {
-            func_fprintf(f, " (actual path: %s)", info->full_backing_filename);
+            qemu_printf(" (actual path: %s)", info->full_backing_filename);
         }
-        func_fprintf(f, "\n");
+        qemu_printf("\n");
         if (info->has_backing_filename_format) {
-            func_fprintf(f, "backing file format: %s\n",
-                         info->backing_filename_format);
+            qemu_printf("backing file format: %s\n",
+                        info->backing_filename_format);
         }
     }
 
     if (info->has_snapshots) {
         SnapshotInfoList *elem;
 
-        func_fprintf(f, "Snapshot list:\n");
-        bdrv_snapshot_dump(func_fprintf, f, NULL);
-        func_fprintf(f, "\n");
+        qemu_printf("Snapshot list:\n");
+        bdrv_snapshot_dump(NULL);
+        qemu_printf("\n");
 
         /* Ideally bdrv_snapshot_dump() would operate on SnapshotInfoList but
          * we convert to the block layer's native QEMUSnapshotInfo for now.
@@ -858,17 +889,19 @@ void bdrv_image_info_dump(fprintf_function func_fprintf, void *f,
                 .date_nsec = elem->value->date_nsec,
                 .vm_clock_nsec = elem->value->vm_clock_sec * 1000000000ULL +
                                  elem->value->vm_clock_nsec,
+                .icount = elem->value->has_icount ?
+                          elem->value->icount : -1ULL,
             };
 
             pstrcpy(sn.id_str, sizeof(sn.id_str), elem->value->id);
             pstrcpy(sn.name, sizeof(sn.name), elem->value->name);
-            bdrv_snapshot_dump(func_fprintf, f, &sn);
-            func_fprintf(f, "\n");
+            bdrv_snapshot_dump(&sn);
+            qemu_printf("\n");
         }
     }
 
     if (info->has_format_specific) {
-        func_fprintf(f, "Format specific information:\n");
-        bdrv_image_info_specific_dump(func_fprintf, f, info->format_specific);
+        qemu_printf("Format specific information:\n");
+        bdrv_image_info_specific_dump(info->format_specific);
     }
 }

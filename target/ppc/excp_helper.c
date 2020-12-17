@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,9 +25,9 @@
 #include "internal.h"
 #include "helper_regs.h"
 
-//#define DEBUG_OP
-//#define DEBUG_SOFTWARE_TLB
-//#define DEBUG_EXCEPTIONS
+/* #define DEBUG_OP */
+/* #define DEBUG_SOFTWARE_TLB */
+/* #define DEBUG_EXCEPTIONS */
 
 #ifdef DEBUG_EXCEPTIONS
 #  define LOG_EXCP(...) qemu_log(__VA_ARGS__)
@@ -49,7 +49,7 @@ void ppc_cpu_do_interrupt(CPUState *cs)
 
 static void ppc_hw_interrupt(CPUPPCState *env)
 {
-    CPUState *cs = CPU(ppc_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     cs->exception_index = POWERPC_EXCP_NONE;
     env->error_code = 0;
@@ -57,12 +57,41 @@ static void ppc_hw_interrupt(CPUPPCState *env)
 #else /* defined(CONFIG_USER_ONLY) */
 static inline void dump_syscall(CPUPPCState *env)
 {
-    qemu_log_mask(CPU_LOG_INT, "syscall r0=%016" PRIx64 " r3=%016" PRIx64
-                  " r4=%016" PRIx64 " r5=%016" PRIx64 " r6=%016" PRIx64
+    qemu_log_mask(CPU_LOG_INT, "syscall r0=%016" PRIx64
+                  " r3=%016" PRIx64 " r4=%016" PRIx64 " r5=%016" PRIx64
+                  " r6=%016" PRIx64 " r7=%016" PRIx64 " r8=%016" PRIx64
                   " nip=" TARGET_FMT_lx "\n",
                   ppc_dump_gpr(env, 0), ppc_dump_gpr(env, 3),
                   ppc_dump_gpr(env, 4), ppc_dump_gpr(env, 5),
-                  ppc_dump_gpr(env, 6), env->nip);
+                  ppc_dump_gpr(env, 6), ppc_dump_gpr(env, 7),
+                  ppc_dump_gpr(env, 8), env->nip);
+}
+
+static inline void dump_syscall_vectored(CPUPPCState *env)
+{
+    qemu_log_mask(CPU_LOG_INT, "syscall r0=%016" PRIx64
+                  " r3=%016" PRIx64 " r4=%016" PRIx64 " r5=%016" PRIx64
+                  " r6=%016" PRIx64 " r7=%016" PRIx64 " r8=%016" PRIx64
+                  " nip=" TARGET_FMT_lx "\n",
+                  ppc_dump_gpr(env, 0), ppc_dump_gpr(env, 3),
+                  ppc_dump_gpr(env, 4), ppc_dump_gpr(env, 5),
+                  ppc_dump_gpr(env, 6), ppc_dump_gpr(env, 7),
+                  ppc_dump_gpr(env, 8), env->nip);
+}
+
+static inline void dump_hcall(CPUPPCState *env)
+{
+    qemu_log_mask(CPU_LOG_INT, "hypercall r3=%016" PRIx64
+                  " r4=%016" PRIx64 " r5=%016" PRIx64 " r6=%016" PRIx64
+                  " r7=%016" PRIx64 " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r10=%016" PRIx64 " r11=%016" PRIx64 " r12=%016" PRIx64
+                  " nip=" TARGET_FMT_lx "\n",
+                  ppc_dump_gpr(env, 3), ppc_dump_gpr(env, 4),
+                  ppc_dump_gpr(env, 5), ppc_dump_gpr(env, 6),
+                  ppc_dump_gpr(env, 7), ppc_dump_gpr(env, 8),
+                  ppc_dump_gpr(env, 9), ppc_dump_gpr(env, 10),
+                  ppc_dump_gpr(env, 11), ppc_dump_gpr(env, 12),
+                  env->nip);
 }
 
 static int powerpc_reset_wakeup(CPUState *cs, CPUPPCState *env, int excp,
@@ -72,7 +101,7 @@ static int powerpc_reset_wakeup(CPUState *cs, CPUPPCState *env, int excp,
     env->resume_as_sreset = false;
 
     /* Pretend to be returning from doze always as we don't lose state */
-    *msr |= (0x1ull << (63 - 47));
+    *msr |= SRR1_WS_NOLOSS;
 
     /* Machine checks are sent normally */
     if (excp == POWERPC_EXCP_MCHECK) {
@@ -80,25 +109,25 @@ static int powerpc_reset_wakeup(CPUState *cs, CPUPPCState *env, int excp,
     }
     switch (excp) {
     case POWERPC_EXCP_RESET:
-        *msr |= 0x4ull << (63 - 45);
+        *msr |= SRR1_WAKERESET;
         break;
     case POWERPC_EXCP_EXTERNAL:
-        *msr |= 0x8ull << (63 - 45);
+        *msr |= SRR1_WAKEEE;
         break;
     case POWERPC_EXCP_DECR:
-        *msr |= 0x6ull << (63 - 45);
+        *msr |= SRR1_WAKEDEC;
         break;
     case POWERPC_EXCP_SDOOR:
-        *msr |= 0x5ull << (63 - 45);
+        *msr |= SRR1_WAKEDBELL;
         break;
     case POWERPC_EXCP_SDOOR_HV:
-        *msr |= 0x3ull << (63 - 45);
+        *msr |= SRR1_WAKEHDBELL;
         break;
     case POWERPC_EXCP_HV_MAINT:
-        *msr |= 0xaull << (63 - 45);
+        *msr |= SRR1_WAKEHMI;
         break;
     case POWERPC_EXCP_HVIRT:
-        *msr |= 0x9ull << (63 - 45);
+        *msr |= SRR1_WAKEHVI;
         break;
     default:
         cpu_abort(cs, "Unsupported exception %d in Power Save mode\n",
@@ -112,6 +141,8 @@ static uint64_t ppc_excp_vector_offset(CPUState *cs, int ail)
     uint64_t offset = 0;
 
     switch (ail) {
+    case AIL_NONE:
+        break;
     case AIL_0001_8000:
         offset = 0x18000;
         break;
@@ -126,15 +157,47 @@ static uint64_t ppc_excp_vector_offset(CPUState *cs, int ail)
     return offset;
 }
 
-/* Note that this function should be greatly optimized
- * when called with a constant excp, from ppc_hw_interrupt
+static inline void powerpc_set_excp_state(PowerPCCPU *cpu,
+                                          target_ulong vector, target_ulong msr)
+{
+    CPUState *cs = CPU(cpu);
+    CPUPPCState *env = &cpu->env;
+
+    /*
+     * We don't use hreg_store_msr here as already have treated any
+     * special case that could occur. Just store MSR and update hflags
+     *
+     * Note: We *MUST* not use hreg_store_msr() as-is anyway because it
+     * will prevent setting of the HV bit which some exceptions might need
+     * to do.
+     */
+    env->msr = msr & env->msr_mask;
+    hreg_compute_hflags(env);
+    env->nip = vector;
+    /* Reset exception state */
+    cs->exception_index = POWERPC_EXCP_NONE;
+    env->error_code = 0;
+
+    /* Reset the reservation */
+    env->reserve_addr = -1;
+
+    /*
+     * Any interrupt is context synchronizing, check if TCG TLB needs
+     * a delayed flush on ppc64
+     */
+    check_tlb_flush(env, false);
+}
+
+/*
+ * Note that this function should be greatly optimized when called
+ * with a constant excp, from ppc_hw_interrupt
  */
 static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
     target_ulong msr, new_msr, vector;
-    int srr0, srr1, asrr0, asrr1, lev, ail;
+    int srr0, srr1, asrr0, asrr1, lev = -1, ail;
     bool lpes0;
 
     qemu_log_mask(CPU_LOG_INT, "Raise exception at " TARGET_FMT_lx
@@ -147,7 +210,8 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         msr = env->msr & ~0x783f0000ULL;
     }
 
-    /* new interrupt handler msr preserves existing HV and ME unless
+    /*
+     * new interrupt handler msr preserves existing HV and ME unless
      * explicitly overriden
      */
     new_msr = env->msr & (((target_ulong)1 << MSR_ME) | MSR_HVB);
@@ -166,7 +230,8 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         excp = powerpc_reset_wakeup(cs, env, excp, &msr);
     }
 
-    /* Exception targetting modifiers
+    /*
+     * Exception targeting modifiers
      *
      * LPES0 is supported on POWER7/8/9
      * LPES1 is not supported (old iSeries mode)
@@ -194,7 +259,8 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         ail = 0;
     }
 
-    /* Hypervisor emulation assistance interrupt only exists on server
+    /*
+     * Hypervisor emulation assistance interrupt only exists on server
      * arch 2.05 server or later. We also don't want to generate it if
      * we don't have HVB in msr_mask (PAPR mode).
      */
@@ -229,8 +295,9 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         break;
     case POWERPC_EXCP_MCHECK:    /* Machine check exception                  */
         if (msr_me == 0) {
-            /* Machine check exception is not enabled.
-             * Enter checkstop state.
+            /*
+             * Machine check exception is not enabled.  Enter
+             * checkstop state.
              */
             fprintf(stderr, "Machine check while not allowed. "
                     "Entering checkstop state\n");
@@ -242,8 +309,9 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
             cpu_interrupt_exittb(cs);
         }
         if (env->msr_mask & MSR_HVB) {
-            /* ISA specifies HV, but can be delivered to guest with HV clear
-             * (e.g., see FWNMI in PAPR).
+            /*
+             * ISA specifies HV, but can be delivered to guest with HV
+             * clear (e.g., see FWNMI in PAPR).
              */
             new_msr |= (target_ulong)MSR_HVB;
         }
@@ -294,9 +362,10 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         break;
     case POWERPC_EXCP_ALIGN:     /* Alignment exception                      */
         /* Get rS/rD and rA from faulting opcode */
-        /* Note: the opcode fields will not be set properly for a direct
-         * store load/store, but nobody cares as nobody actually uses
-         * direct store segments.
+        /*
+         * Note: the opcode fields will not be set properly for a
+         * direct store load/store, but nobody cares as nobody
+         * actually uses direct store segments.
          */
         env->spr[SPR_DSISR] |= (env->error_code & 0x03FF0000) >> 16;
         break;
@@ -310,7 +379,8 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
                 return;
             }
 
-            /* FP exceptions always have NIP pointing to the faulting
+            /*
+             * FP exceptions always have NIP pointing to the faulting
              * instruction, so always use store_next and claim we are
              * precise in the MSR.
              */
@@ -338,10 +408,16 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         }
         break;
     case POWERPC_EXCP_SYSCALL:   /* System call exception                    */
-        dump_syscall(env);
         lev = env->error_code;
 
-        /* We need to correct the NIP which in this case is supposed
+        if ((lev == 1) && cpu->vhyp) {
+            dump_hcall(env);
+        } else {
+            dump_syscall(env);
+        }
+
+        /*
+         * We need to correct the NIP which in this case is supposed
          * to point to the next instruction
          */
         env->nip += 4;
@@ -356,6 +432,13 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         if (lev == 1) {
             new_msr |= (target_ulong)MSR_HVB;
         }
+        break;
+    case POWERPC_EXCP_SYSCALL_VECTORED: /* scv exception                     */
+        lev = env->error_code;
+        dump_syscall_vectored(env);
+        env->nip += 4;
+        new_msr |= env->msr & ((target_ulong)1 << MSR_EE);
+        new_msr |= env->msr & ((target_ulong)1 << MSR_RI);
         break;
     case POWERPC_EXCP_FPU:       /* Floating-point unavailable exception     */
     case POWERPC_EXCP_APU:       /* Auxiliary processor unavailable          */
@@ -425,8 +508,9 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
             new_msr |= ((target_ulong)1 << MSR_ME);
         }
         if (env->msr_mask & MSR_HVB) {
-            /* ISA specifies HV, but can be delivered to guest with HV clear
-             * (e.g., see FWNMI in PAPR, NMI injection in QEMU).
+            /*
+             * ISA specifies HV, but can be delivered to guest with HV
+             * clear (e.g., see FWNMI in PAPR, NMI injection in QEMU).
              */
             new_msr |= (target_ulong)MSR_HVB;
         } else {
@@ -441,9 +525,11 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
     case POWERPC_EXCP_ISEG:      /* Instruction segment exception            */
     case POWERPC_EXCP_TRACE:     /* Trace exception                          */
         break;
+    case POWERPC_EXCP_HISI:      /* Hypervisor instruction storage exception */
+        msr |= env->error_code;
+        /* fall through */
     case POWERPC_EXCP_HDECR:     /* Hypervisor decrementer exception         */
     case POWERPC_EXCP_HDSI:      /* Hypervisor data storage exception        */
-    case POWERPC_EXCP_HISI:      /* Hypervisor instruction storage exception */
     case POWERPC_EXCP_HDSEG:     /* Hypervisor data segment exception        */
     case POWERPC_EXCP_HISEG:     /* Hypervisor instruction segment exception */
     case POWERPC_EXCP_SDOOR_HV:  /* Hypervisor Doorbell interrupt            */
@@ -459,6 +545,15 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
     case POWERPC_EXCP_FU:         /* Facility unavailable exception          */
 #ifdef TARGET_PPC64
         env->spr[SPR_FSCR] |= ((target_ulong)env->error_code << 56);
+#endif
+        break;
+    case POWERPC_EXCP_HV_FU:     /* Hypervisor Facility Unavailable Exception */
+#ifdef TARGET_PPC64
+        env->spr[SPR_HFSCR] |= ((target_ulong)env->error_code << FSCR_IC_POS);
+        srr0 = SPR_HSRR0;
+        srr1 = SPR_HSRR1;
+        new_msr |= (target_ulong)MSR_HVB;
+        new_msr |= env->msr & ((target_ulong)1 << MSR_RI);
 #endif
         break;
     case POWERPC_EXCP_PIT:       /* Programmable interval timer interrupt    */
@@ -649,12 +744,6 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         break;
     }
 
-    /* Save PC */
-    env->spr[srr0] = env->nip;
-
-    /* Save MSR */
-    env->spr[srr1] = msr;
-
     /* Sanity check */
     if (!(env->msr_mask & MSR_HVB)) {
         if (new_msr & MSR_HVB) {
@@ -667,15 +756,8 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         }
     }
 
-    /* If any alternate SRR register are defined, duplicate saved values */
-    if (asrr0 != -1) {
-        env->spr[asrr0] = env->spr[srr0];
-    }
-    if (asrr1 != -1) {
-        env->spr[asrr1] = env->spr[srr1];
-    }
-
-    /* Sort out endianness of interrupt, this differs depending on the
+    /*
+     * Sort out endianness of interrupt, this differs depending on the
      * CPU, the HV mode, etc...
      */
 #ifdef TARGET_PPC64
@@ -708,25 +790,29 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
     }
 #endif
 
-    /* Jump to handler */
-    vector = env->excp_vectors[excp];
-    if (vector == (target_ulong)-1ULL) {
-        cpu_abort(cs, "Raised an exception without defined vector %d\n",
-                  excp);
-    }
-    vector |= env->excp_prefix;
-
-    /* AIL only works if there is no HV transition and we are running with
-     * translations enabled
+    /*
+     * AIL only works if there is no HV transition and we are running
+     * with translations enabled
      */
     if (!((msr >> MSR_IR) & 1) || !((msr >> MSR_DR) & 1) ||
         ((new_msr & MSR_HVB) && !(msr & MSR_HVB))) {
         ail = 0;
     }
-    /* Handle AIL */
-    if (ail) {
-        new_msr |= (1 << MSR_IR) | (1 << MSR_DR);
-        vector |= ppc_excp_vector_offset(cs, ail);
+
+    vector = env->excp_vectors[excp];
+    if (vector == (target_ulong)-1ULL) {
+        cpu_abort(cs, "Raised an exception without defined vector %d\n",
+                  excp);
+    }
+
+    vector |= env->excp_prefix;
+
+    /* If any alternate SRR register are defined, duplicate saved values */
+    if (asrr0 != -1) {
+        env->spr[asrr0] = env->nip;
+    }
+    if (asrr1 != -1) {
+        env->spr[asrr1] = msr;
     }
 
 #if defined(TARGET_PPC64)
@@ -745,27 +831,39 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         }
     }
 #endif
-    /* We don't use hreg_store_msr here as already have treated
-     * any special case that could occur. Just store MSR and update hflags
-     *
-     * Note: We *MUST* not use hreg_store_msr() as-is anyway because it
-     * will prevent setting of the HV bit which some exceptions might need
-     * to do.
-     */
-    env->msr = new_msr & env->msr_mask;
-    hreg_compute_hflags(env);
-    env->nip = vector;
-    /* Reset exception state */
-    cs->exception_index = POWERPC_EXCP_NONE;
-    env->error_code = 0;
 
-    /* Reset the reservation */
-    env->reserve_addr = -1;
+    if (excp != POWERPC_EXCP_SYSCALL_VECTORED) {
+        /* Save PC */
+        env->spr[srr0] = env->nip;
 
-    /* Any interrupt is context synchronizing, check if TCG TLB
-     * needs a delayed flush on ppc64
-     */
-    check_tlb_flush(env, false);
+        /* Save MSR */
+        env->spr[srr1] = msr;
+
+        /* Handle AIL */
+        if (ail) {
+            new_msr |= (1 << MSR_IR) | (1 << MSR_DR);
+            vector |= ppc_excp_vector_offset(cs, ail);
+        }
+
+#if defined(TARGET_PPC64)
+    } else {
+        /* scv AIL is a little different */
+        if (ail) {
+            new_msr |= (1 << MSR_IR) | (1 << MSR_DR);
+        }
+        if (ail == AIL_C000_0000_0000_4000) {
+            vector |= 0xc000000000003000ull;
+        } else {
+            vector |= 0x0000000000017000ull;
+        }
+        vector += lev * 0x20;
+
+        env->lr = env->nip;
+        env->ctr = msr;
+#endif
+    }
+
+    powerpc_set_excp_state(cpu, vector, new_msr);
 }
 
 void ppc_cpu_do_interrupt(CPUState *cs)
@@ -778,7 +876,7 @@ void ppc_cpu_do_interrupt(CPUState *cs)
 
 static void ppc_hw_interrupt(CPUPPCState *env)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     bool async_deliver;
 
     /* External reset */
@@ -884,7 +982,11 @@ static void ppc_hw_interrupt(CPUPPCState *env)
         }
         if (env->pending_interrupts & (1 << PPC_INTERRUPT_DOORBELL)) {
             env->pending_interrupts &= ~(1 << PPC_INTERRUPT_DOORBELL);
-            powerpc_excp(cpu, env->excp_model, POWERPC_EXCP_DOORI);
+            if (is_book3s_arch2x(env)) {
+                powerpc_excp(cpu, env->excp_model, POWERPC_EXCP_SDOOR);
+            } else {
+                powerpc_excp(cpu, env->excp_model, POWERPC_EXCP_DOORI);
+            }
             return;
         }
         if (env->pending_interrupts & (1 << PPC_INTERRUPT_HDOORBELL)) {
@@ -914,10 +1016,10 @@ static void ppc_hw_interrupt(CPUPPCState *env)
          * This means we will incorrectly execute past the power management
          * instruction instead of triggering a reset.
          *
-         * It generally means a discrepancy between the wakup conditions in the
+         * It generally means a discrepancy between the wakeup conditions in the
          * processor has_work implementation and the logic in this function.
          */
-        cpu_abort(CPU(ppc_env_get_cpu(env)),
+        cpu_abort(env_cpu(env),
                   "Wakeup from PM state but interrupt Undelivered");
     }
 }
@@ -928,6 +1030,26 @@ void ppc_cpu_do_system_reset(CPUState *cs)
     CPUPPCState *env = &cpu->env;
 
     powerpc_excp(cpu, env->excp_model, POWERPC_EXCP_RESET);
+}
+
+void ppc_cpu_do_fwnmi_machine_check(CPUState *cs, target_ulong vector)
+{
+    PowerPCCPU *cpu = POWERPC_CPU(cs);
+    CPUPPCState *env = &cpu->env;
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
+    target_ulong msr = 0;
+
+    /*
+     * Set MSR and NIP for the handler, SRR0/1, DAR and DSISR have already
+     * been set by KVM.
+     */
+    msr = (1ULL << MSR_ME);
+    msr |= env->msr & (1ULL << MSR_SF);
+    if (!(*pcc->interrupts_big_endian)(cpu)) {
+        msr |= (1ULL << MSR_LE);
+    }
+
+    powerpc_set_excp_state(cpu, vector, msr);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -960,7 +1082,7 @@ static void cpu_dump_rfi(target_ulong RA, target_ulong msr)
 void raise_exception_err_ra(CPUPPCState *env, uint32_t exception,
                             uint32_t error_code, uintptr_t raddr)
 {
-    CPUState *cs = CPU(ppc_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     cs->exception_index = exception;
     env->error_code = error_code;
@@ -1001,7 +1123,7 @@ void helper_store_msr(CPUPPCState *env, target_ulong val)
     uint32_t excp = hreg_store_msr(env, val, 0);
 
     if (excp != 0) {
-        CPUState *cs = CPU(ppc_env_get_cpu(env));
+        CPUState *cs = env_cpu(env);
         cpu_interrupt_exittb(cs);
         raise_exception(env, excp);
     }
@@ -1012,11 +1134,12 @@ void helper_pminsn(CPUPPCState *env, powerpc_pm_insn_t insn)
 {
     CPUState *cs;
 
-    cs = CPU(ppc_env_get_cpu(env));
+    cs = env_cpu(env);
     cs->halted = 1;
 
-    /* The architecture specifies that HDEC interrupts are
-     * discarded in PM states
+    /*
+     * The architecture specifies that HDEC interrupts are discarded
+     * in PM states
      */
     env->pending_interrupts &= ~(1 << PPC_INTERRUPT_HDECR);
 
@@ -1028,7 +1151,7 @@ void helper_pminsn(CPUPPCState *env, powerpc_pm_insn_t insn)
 
 static inline void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
 {
-    CPUState *cs = CPU(ppc_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     /* MSR:POW cannot be set by any form of rfi */
     msr &= ~(1ULL << MSR_POW);
@@ -1047,8 +1170,9 @@ static inline void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
 #if defined(DEBUG_OP)
     cpu_dump_rfi(env->nip, env->msr);
 #endif
-    /* No need to raise an exception here,
-     * as rfi is always the last insn of a TB
+    /*
+     * No need to raise an exception here, as rfi is always the last
+     * insn of a TB
      */
     cpu_interrupt_exittb(cs);
     /* Reset the reservation */
@@ -1067,12 +1191,18 @@ void helper_rfi(CPUPPCState *env)
 #if defined(TARGET_PPC64)
 void helper_rfid(CPUPPCState *env)
 {
-    /* The architeture defines a number of rules for which bits
-     * can change but in practice, we handle this in hreg_store_msr()
+    /*
+     * The architecture defines a number of rules for which bits can
+     * change but in practice, we handle this in hreg_store_msr()
      * which will be called by do_rfi(), so there is no need to filter
      * here
      */
     do_rfi(env, env->spr[SPR_SRR0], env->spr[SPR_SRR1]);
+}
+
+void helper_rfscv(CPUPPCState *env)
+{
+    do_rfi(env, env->lr, env->ctr);
 }
 
 void helper_hrfid(CPUPPCState *env)
@@ -1202,36 +1332,29 @@ void helper_msgsnd(target_ulong rb)
 }
 
 /* Server Processor Control */
-static int book3s_dbell2irq(target_ulong rb)
-{
-    int msg = rb & DBELL_TYPE_MASK;
 
-    /* A Directed Hypervisor Doorbell message is sent only if the
+static bool dbell_type_server(target_ulong rb)
+{
+    /*
+     * A Directed Hypervisor Doorbell message is sent only if the
      * message type is 5. All other types are reserved and the
-     * instruction is a no-op */
-    return msg == DBELL_TYPE_DBELL_SERVER ? PPC_INTERRUPT_HDOORBELL : -1;
+     * instruction is a no-op
+     */
+    return (rb & DBELL_TYPE_MASK) == DBELL_TYPE_DBELL_SERVER;
 }
 
 void helper_book3s_msgclr(CPUPPCState *env, target_ulong rb)
 {
-    int irq = book3s_dbell2irq(rb);
-
-    if (irq < 0) {
+    if (!dbell_type_server(rb)) {
         return;
     }
 
-    env->pending_interrupts &= ~(1 << irq);
+    env->pending_interrupts &= ~(1 << PPC_INTERRUPT_HDOORBELL);
 }
 
-void helper_book3s_msgsnd(target_ulong rb)
+static void book3s_msgsnd_common(int pir, int irq)
 {
-    int irq = book3s_dbell2irq(rb);
-    int pir = rb & DBELL_PROCIDTAG_MASK;
     CPUState *cs;
-
-    if (irq < 0) {
-        return;
-    }
 
     qemu_mutex_lock_iothread();
     CPU_FOREACH(cs) {
@@ -1246,6 +1369,49 @@ void helper_book3s_msgsnd(target_ulong rb)
     }
     qemu_mutex_unlock_iothread();
 }
+
+void helper_book3s_msgsnd(target_ulong rb)
+{
+    int pir = rb & DBELL_PROCIDTAG_MASK;
+
+    if (!dbell_type_server(rb)) {
+        return;
+    }
+
+    book3s_msgsnd_common(pir, PPC_INTERRUPT_HDOORBELL);
+}
+
+#if defined(TARGET_PPC64)
+void helper_book3s_msgclrp(CPUPPCState *env, target_ulong rb)
+{
+    helper_hfscr_facility_check(env, HFSCR_MSGP, "msgclrp", HFSCR_IC_MSGP);
+
+    if (!dbell_type_server(rb)) {
+        return;
+    }
+
+    env->pending_interrupts &= ~(1 << PPC_INTERRUPT_DOORBELL);
+}
+
+/*
+ * sends a message to other threads that are on the same
+ * multi-threaded processor
+ */
+void helper_book3s_msgsndp(CPUPPCState *env, target_ulong rb)
+{
+    int pir = env->spr_cb[SPR_PIR].default_value;
+
+    helper_hfscr_facility_check(env, HFSCR_MSGP, "msgsndp", HFSCR_IC_MSGP);
+
+    if (!dbell_type_server(rb)) {
+        return;
+    }
+
+    /* TODO: TCG supports only one thread */
+
+    book3s_msgsnd_common(pir, PPC_INTERRUPT_DOORBELL);
+}
+#endif
 #endif
 
 void ppc_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,

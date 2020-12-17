@@ -30,6 +30,7 @@
 #include "exec/tb-lookup.h"
 #include "disas/disas.h"
 #include "exec/log.h"
+#include "tcg/tcg.h"
 
 /* 32-bit helpers */
 
@@ -146,7 +147,7 @@ uint64_t HELPER(ctpop_i64)(uint64_t arg)
 
 void *HELPER(lookup_tb_ptr)(CPUArchState *env)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
+    CPUState *cpu = env_cpu(env);
     TranslationBlock *tb;
     target_ulong cs_base, pc;
     uint32_t flags;
@@ -165,5 +166,5 @@ void *HELPER(lookup_tb_ptr)(CPUArchState *env)
 
 void HELPER(exit_atomic)(CPUArchState *env)
 {
-    cpu_loop_exit_atomic(ENV_GET_CPU(env), GETPC());
+    cpu_loop_exit_atomic(env_cpu(env), GETPC());
 }

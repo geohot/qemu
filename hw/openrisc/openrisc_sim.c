@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,18 +21,19 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/boards.h"
 #include "elf.h"
 #include "hw/char/serial.h"
 #include "net/net.h"
 #include "hw/loader.h"
+#include "hw/qdev-properties.h"
 #include "exec/address-spaces.h"
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
 #include "sysemu/qtest.h"
+#include "sysemu/reset.h"
 
 #define KERNEL_LOAD_ADDR 0x100
 
@@ -58,11 +59,11 @@ static void openrisc_sim_net_init(hwaddr base, hwaddr descriptors,
     SysBusDevice *s;
     int i;
 
-    dev = qdev_create(NULL, "open_eth");
+    dev = qdev_new("open_eth");
     qdev_set_nic_properties(dev, nd);
-    qdev_init_nofail(dev);
 
     s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
     for (i = 0; i < num_cpus; i++) {
         sysbus_connect_irq(s, 0, cpu_irqs[i][irq_pin]);
     }
@@ -77,11 +78,11 @@ static void openrisc_sim_ompic_init(hwaddr base, int num_cpus,
     SysBusDevice *s;
     int i;
 
-    dev = qdev_create(NULL, "or1k-ompic");
+    dev = qdev_new("or1k-ompic");
     qdev_prop_set_uint32(dev, "num-cpus", num_cpus);
-    qdev_init_nofail(dev);
 
     s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
     for (i = 0; i < num_cpus; i++) {
         sysbus_connect_irq(s, i, cpu_irqs[i][irq_pin]);
     }
@@ -97,7 +98,7 @@ static void openrisc_load_kernel(ram_addr_t ram_size,
 
     if (kernel_filename && !qtest_enabled()) {
         kernel_size = load_elf(kernel_filename, NULL, NULL, NULL,
-                               &elf_entry, NULL, NULL, 1, EM_OPENRISC,
+                               &elf_entry, NULL, NULL, NULL, 1, EM_OPENRISC,
                                1, 0);
         entry = elf_entry;
         if (kernel_size < 0) {
@@ -131,7 +132,9 @@ static void openrisc_sim_init(MachineState *machine)
     qemu_irq *cpu_irqs[2];
     qemu_irq serial_irq;
     int n;
+    unsigned int smp_cpus = machine->smp.cpus;
 
+    assert(smp_cpus >= 1 && smp_cpus <= 2);
     for (n = 0; n < smp_cpus; n++) {
         cpu = OPENRISC_CPU(cpu_create(machine->cpu_type));
         if (cpu == NULL) {
@@ -174,7 +177,7 @@ static void openrisc_sim_machine_init(MachineClass *mc)
     mc->desc = "or1k simulation";
     mc->init = openrisc_sim_init;
     mc->max_cpus = 2;
-    mc->is_default = 1;
+    mc->is_default = true;
     mc->default_cpu_type = OPENRISC_CPU_TYPE_NAME("or1200");
 }
 

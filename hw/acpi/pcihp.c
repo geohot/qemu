@@ -10,7 +10,7 @@
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2 as published by the Free Software Foundation.
+ * License version 2.1 as published by the Free Software Foundation.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,24 +27,16 @@
 #include "qemu/osdep.h"
 #include "hw/acpi/pcihp.h"
 
-#include "hw/hw.h"
-#include "hw/i386/pc.h"
+#include "hw/pci-host/i440fx.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/acpi/acpi.h"
-#include "sysemu/sysemu.h"
 #include "exec/address-spaces.h"
 #include "hw/pci/pci_bus.h"
+#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qom/qom-qobject.h"
-
-//#define DEBUG
-
-#ifdef DEBUG
-# define ACPI_PCIHP_DPRINTF(format, ...)     printf(format, ## __VA_ARGS__)
-#else
-# define ACPI_PCIHP_DPRINTF(format, ...)     do { } while (0)
-#endif
+#include "trace.h"
 
 #define ACPI_PCIHP_ADDR 0xae00
 #define ACPI_PCIHP_SIZE 0x0014
@@ -88,7 +80,7 @@ static void *acpi_set_bsel(PCIBus *bus, void *opaque)
 
         *bus_bsel = (*bsel_alloc)++;
         object_property_add_uint32_ptr(OBJECT(bus), ACPI_PCIHP_PROP_BSEL,
-                                       bus_bsel, &error_abort);
+                                       bus_bsel, OBJ_PROP_FLAG_READ);
     }
 
     return bsel_alloc;
@@ -110,6 +102,24 @@ static void acpi_set_pci_info(void)
         /* Scan all PCI buses. Set property to enable acpi based hotplug. */
         pci_for_each_bus_depth_first(bus, acpi_set_bsel, NULL, &bsel_alloc);
     }
+}
+
+static void acpi_pcihp_disable_root_bus(void)
+{
+    static bool root_hp_disabled;
+    PCIBus *bus;
+
+    if (root_hp_disabled) {
+        return;
+    }
+
+    bus = find_i440fx();
+    if (bus) {
+        /* setting the hotplug handler to NULL makes the bus non-hotpluggable */
+        qbus_set_hotplug_handler(BUS(bus), NULL);
+    }
+    root_hp_disabled = true;
+    return;
 }
 
 static void acpi_pcihp_test_hotplug_bus(PCIBus *bus, void *opaque)
@@ -137,6 +147,21 @@ static PCIBus *acpi_pcihp_find_hotplug_bus(AcpiPciHpState *s, int bsel)
     if (!bsel && !find.bus) {
         find.bus = s->root;
     }
+
+    /*
+     * Check if find.bus is actually hotpluggable. If bsel is set to
+     * NULL for example on the root bus in order to make it
+     * non-hotpluggable, find.bus will match the root bus when bsel
+     * is 0. See acpi_pcihp_test_hotplug_bus() above. Since the
+     * bus is not hotpluggable however, we should not select the bus.
+     * Instead, we should set find.bus to NULL in that case. In the check
+     * below, we generalize this case for all buses, not just the root bus.
+     * The callers of this function check for a null return value and
+     * handle them appropriately.
+     */
+    if (find.bus && !qbus_is_hotpluggable(BUS(find.bus))) {
+        find.bus = NULL;
+    }
     return find.bus;
 }
 
@@ -159,7 +184,9 @@ static void acpi_pcihp_eject_slot(AcpiPciHpState *s, unsigned bsel, unsigned slo
     int slot = ctz32(slots);
     PCIBus *bus = acpi_pcihp_find_hotplug_bus(s, bsel);
 
-    if (!bus) {
+    trace_acpi_pci_eject_slot(bsel, slot);
+
+    if (!bus || slot > 31) {
         return;
     }
 
@@ -215,8 +242,11 @@ static void acpi_pcihp_update(AcpiPciHpState *s)
     }
 }
 
-void acpi_pcihp_reset(AcpiPciHpState *s)
+void acpi_pcihp_reset(AcpiPciHpState *s, bool acpihp_root_off)
 {
+    if (acpihp_root_off) {
+        acpi_pcihp_disable_root_bus();
+    }
     acpi_set_pci_info();
     acpi_pcihp_update(s);
 }
@@ -252,8 +282,7 @@ void acpi_pcihp_device_plug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
             object_dynamic_cast(OBJECT(dev), TYPE_PCI_BRIDGE)) {
             PCIBus *sec = pci_bridge_get_sec_bus(PCI_BRIDGE(pdev));
 
-            qbus_set_hotplug_handler(BUS(sec), OBJECT(hotplug_dev),
-                                     &error_abort);
+            qbus_set_hotplug_handler(BUS(sec), OBJECT(hotplug_dev));
             /* We don't have to overwrite any other hotplug handler yet */
             assert(QLIST_EMPTY(&sec->child));
         }
@@ -270,7 +299,9 @@ void acpi_pcihp_device_plug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
 void acpi_pcihp_device_unplug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
                                  DeviceState *dev, Error **errp)
 {
-    object_property_set_bool(OBJECT(dev), false, "realized", NULL);
+    trace_acpi_pci_unplug(PCI_SLOT(PCI_DEVICE(dev)->devfn),
+                          acpi_pcihp_get_bsel(pci_get_bus(PCI_DEVICE(dev))));
+    qdev_unrealize(dev);
 }
 
 void acpi_pcihp_device_unplug_request_cb(HotplugHandler *hotplug_dev,
@@ -280,6 +311,9 @@ void acpi_pcihp_device_unplug_request_cb(HotplugHandler *hotplug_dev,
     PCIDevice *pdev = PCI_DEVICE(dev);
     int slot = PCI_SLOT(pdev->devfn);
     int bsel = acpi_pcihp_get_bsel(pci_get_bus(pdev));
+
+    trace_acpi_pci_unplug_request(bsel, slot);
+
     if (bsel < 0) {
         error_setg(errp, "Unsupported bus. Bus doesn't have property '"
                    ACPI_PCIHP_PROP_BSEL "' set");
@@ -306,23 +340,23 @@ static uint64_t pci_read(void *opaque, hwaddr addr, unsigned int size)
         if (!s->legacy_piix) {
             s->acpi_pcihp_pci_status[bsel].up = 0;
         }
-        ACPI_PCIHP_DPRINTF("pci_up_read %" PRIu32 "\n", val);
+        trace_acpi_pci_up_read(val);
         break;
     case PCI_DOWN_BASE:
         val = s->acpi_pcihp_pci_status[bsel].down;
-        ACPI_PCIHP_DPRINTF("pci_down_read %" PRIu32 "\n", val);
+        trace_acpi_pci_down_read(val);
         break;
     case PCI_EJ_BASE:
         /* No feature defined yet */
-        ACPI_PCIHP_DPRINTF("pci_features_read %" PRIu32 "\n", val);
+        trace_acpi_pci_features_read(val);
         break;
     case PCI_RMV_BASE:
         val = s->acpi_pcihp_pci_status[bsel].hotplug_enable;
-        ACPI_PCIHP_DPRINTF("pci_rmv_read %" PRIu32 "\n", val);
+        trace_acpi_pci_rmv_read(val);
         break;
     case PCI_SEL_BASE:
         val = s->hotplug_select;
-        ACPI_PCIHP_DPRINTF("pci_sel_read %" PRIu32 "\n", val);
+        trace_acpi_pci_sel_read(val);
     default:
         break;
     }
@@ -340,13 +374,11 @@ static void pci_write(void *opaque, hwaddr addr, uint64_t data,
             break;
         }
         acpi_pcihp_eject_slot(s, s->hotplug_select, data);
-        ACPI_PCIHP_DPRINTF("pciej write %" HWADDR_PRIx " <== %" PRIu64 "\n",
-                      addr, data);
+        trace_acpi_pci_ej_write(addr, data);
         break;
     case PCI_SEL_BASE:
         s->hotplug_select = s->legacy_piix ? ACPI_PCIHP_BSEL_DEFAULT : data;
-        ACPI_PCIHP_DPRINTF("pcisel write %" HWADDR_PRIx " <== %" PRIu64 "\n",
-                      addr, data);
+        trace_acpi_pci_sel_write(addr, data);
     default:
         break;
     }
@@ -368,7 +400,7 @@ void acpi_pcihp_init(Object *owner, AcpiPciHpState *s, PCIBus *root_bus,
     s->io_len = ACPI_PCIHP_SIZE;
     s->io_base = ACPI_PCIHP_ADDR;
 
-    s->root= root_bus;
+    s->root = root_bus;
     s->legacy_piix = !bridges_enabled;
 
     memory_region_init_io(&s->io, owner, &acpi_pcihp_io_ops, s,
@@ -376,9 +408,9 @@ void acpi_pcihp_init(Object *owner, AcpiPciHpState *s, PCIBus *root_bus,
     memory_region_add_subregion(address_space_io, s->io_base, &s->io);
 
     object_property_add_uint16_ptr(owner, ACPI_PCIHP_IO_BASE_PROP, &s->io_base,
-                                   &error_abort);
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint16_ptr(owner, ACPI_PCIHP_IO_LEN_PROP, &s->io_len,
-                                   &error_abort);
+                                   OBJ_PROP_FLAG_READ);
 }
 
 const VMStateDescription vmstate_acpi_pcihp_pci_status = {

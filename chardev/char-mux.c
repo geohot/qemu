@@ -24,11 +24,12 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 #include "qemu/option.h"
 #include "chardev/char.h"
 #include "sysemu/block-backend.h"
 #include "sysemu/sysemu.h"
-#include "chardev/char-mux.h"
+#include "chardev-internal.h"
 
 /* MUX driver for serial I/O splitting */
 
@@ -116,7 +117,7 @@ static void mux_print_help(Chardev *chr)
     }
 }
 
-static void mux_chr_send_event(MuxChardev *d, int mux_nr, int event)
+static void mux_chr_send_event(MuxChardev *d, int mux_nr, QEMUChrEvent event)
 {
     CharBackend *be = d->backends[mux_nr];
 
@@ -125,7 +126,7 @@ static void mux_chr_send_event(MuxChardev *d, int mux_nr, int event)
     }
 }
 
-static void mux_chr_be_event(Chardev *chr, int event)
+static void mux_chr_be_event(Chardev *chr, QEMUChrEvent event)
 {
     MuxChardev *d = MUX_CHARDEV(chr);
 
@@ -231,7 +232,7 @@ static void mux_chr_read(void *opaque, const uint8_t *buf, int size)
         }
 }
 
-void mux_chr_send_all_event(Chardev *chr, int event)
+void mux_chr_send_all_event(Chardev *chr, QEMUChrEvent event)
 {
     MuxChardev *d = MUX_CHARDEV(chr);
     int i;
@@ -246,7 +247,7 @@ void mux_chr_send_all_event(Chardev *chr, int event)
     }
 }
 
-static void mux_chr_event(void *opaque, int event)
+static void mux_chr_event(void *opaque, QEMUChrEvent event)
 {
     mux_chr_send_all_event(CHARDEV(opaque), event);
 }

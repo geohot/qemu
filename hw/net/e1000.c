@@ -13,7 +13,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,17 +26,20 @@
 
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "net/net.h"
 #include "net/checksum.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
 #include "qemu/iov.h"
+#include "qemu/module.h"
 #include "qemu/range.h"
 
 #include "e1000x_common.h"
 #include "trace.h"
+#include "qom/object.h"
 
 static const uint8_t bcast[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
@@ -74,7 +77,7 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
  *  Others never tested
  */
 
-typedef struct E1000State_st {
+struct E1000State_st {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -120,6 +123,8 @@ typedef struct E1000State_st {
     bool mit_irq_level;        /* Tracks interrupt pin level. */
     uint32_t mit_ide;          /* Tracks E1000_TXD_CMD_IDE bit. */
 
+    QEMUTimer *flush_queue_timer;
+
 /* Compatibility flags for migration to/from qemu 1.3.0 and older */
 #define E1000_FLAG_AUTONEG_BIT 0
 #define E1000_FLAG_MIT_BIT 1
@@ -133,24 +138,22 @@ typedef struct E1000State_st {
     bool received_tx_tso;
     bool use_tso_for_migration;
     e1000x_txd_props mig_props;
-} E1000State;
+};
+typedef struct E1000State_st E1000State;
 
 #define chkflag(x)     (s->compat_flags & E1000_FLAG_##x)
 
-typedef struct E1000BaseClass {
+struct E1000BaseClass {
     PCIDeviceClass parent_class;
     uint16_t phy_id2;
-} E1000BaseClass;
+};
+typedef struct E1000BaseClass E1000BaseClass;
 
 #define TYPE_E1000_BASE "e1000-base"
 
-#define E1000(obj) \
-    OBJECT_CHECK(E1000State, (obj), TYPE_E1000_BASE)
+DECLARE_OBJ_CHECKERS(E1000State, E1000BaseClass,
+                     E1000, TYPE_E1000_BASE)
 
-#define E1000_DEVICE_CLASS(klass) \
-     OBJECT_CLASS_CHECK(E1000BaseClass, (klass), TYPE_E1000_BASE)
-#define E1000_DEVICE_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(E1000BaseClass, (obj), TYPE_E1000_BASE)
 
 static void
 e1000_link_up(E1000State *s)
@@ -361,11 +364,12 @@ e1000_autoneg_timer(void *opaque)
 static void e1000_reset(void *opaque)
 {
     E1000State *d = opaque;
-    E1000BaseClass *edc = E1000_DEVICE_GET_CLASS(d);
+    E1000BaseClass *edc = E1000_GET_CLASS(d);
     uint8_t *macaddr = d->conf.macaddr.a;
 
     timer_del(d->autoneg_timer);
     timer_del(d->mit_timer);
+    timer_del(d->flush_queue_timer);
     d->mit_timer_on = 0;
     d->mit_irq_level = 0;
     d->mit_ide = 0;
@@ -392,6 +396,14 @@ set_ctrl(E1000State *s, int index, uint32_t val)
 }
 
 static void
+e1000_flush_queue_timer(void *opaque)
+{
+    E1000State *s = opaque;
+
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+}
+
+static void
 set_rx_control(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[RCTL] = val;
@@ -399,7 +411,8 @@ set_rx_control(E1000State *s, int index, uint32_t val)
     s->rxbuf_min_shift = ((val / E1000_RCTL_RDMTS_QUAT) & 3) + 1;
     DBGOUT(RX, "RCTL: %d, mac_reg[RCTL] = 0x%x\n", s->mac_reg[RDT],
            s->mac_reg[RCTL]);
-    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    timer_mod(s->flush_queue_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
 }
 
 static void
@@ -831,13 +844,13 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
     return total_size <= bufs * s->rxbuf_size;
 }
 
-static int
+static bool
 e1000_can_receive(NetClientState *nc)
 {
     E1000State *s = qemu_get_nic_opaque(nc);
 
     return e1000x_rx_ready(&s->parent_obj, s->mac_reg) &&
-        e1000_has_rxbufs(s, 1);
+        e1000_has_rxbufs(s, 1) && !timer_pending(s->flush_queue_timer);
 }
 
 static uint64_t rx_desc_base(E1000State *s)
@@ -881,11 +894,14 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         return -1;
     }
 
+    if (timer_pending(s->flush_queue_timer)) {
+        return 0;
+    }
+
     /* Pad to minimum Ethernet frame length */
     if (size < sizeof(min_buf)) {
         iov_to_buf(iov, iovcnt, 0, min_buf, size);
         memset(&min_buf[size], 0, sizeof(min_buf) - size);
-        e1000x_inc_reg_if_not_full(s->mac_reg, RUC);
         min_iov.iov_base = filter_buf = min_buf;
         min_iov.iov_len = size = sizeof(min_buf);
         iovcnt = 1;
@@ -1133,7 +1149,8 @@ set_ims(E1000State *s, int index, uint32_t val)
 }
 
 #define getreg(x)    [x] = mac_readreg
-static uint32_t (*macreg_readops[])(E1000State *, int) = {
+typedef uint32_t (*readops)(E1000State *, int);
+static const readops macreg_readops[] = {
     getreg(PBA),      getreg(RCTL),     getreg(TDH),      getreg(TXDCTL),
     getreg(WUFC),     getreg(TDT),      getreg(CTRL),     getreg(LEDCTL),
     getreg(MANC),     getreg(MDIC),     getreg(SWSM),     getreg(STATUS),
@@ -1188,7 +1205,8 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
 enum { NREADOPS = ARRAY_SIZE(macreg_readops) };
 
 #define putreg(x)    [x] = mac_writereg
-static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
+typedef void (*writeops)(E1000State *, int, uint32_t);
+static const writeops macreg_writeops[] = {
     putreg(PBA),      putreg(EERD),     putreg(SWSM),     putreg(WUFC),
     putreg(TDBAL),    putreg(TDBAH),    putreg(TXDCTL),   putreg(RDBAH),
     putreg(RDBAL),    putreg(LEDCTL),   putreg(VET),      putreg(FCRUC),
@@ -1365,11 +1383,6 @@ static int e1000_pre_save(void *opaque)
     E1000State *s = opaque;
     NetClientState *nc = qemu_get_queue(s->nic);
 
-    /* If the mitigation timer is active, emulate a timeout now. */
-    if (s->mit_timer_on) {
-        e1000_mit_timer(s);
-    }
-
     /*
      * If link is down and auto-negotiation is supported and ongoing,
      * complete auto-negotiation immediately. This allows us to look
@@ -1407,7 +1420,8 @@ static int e1000_post_load(void *opaque, int version_id)
         s->mit_irq_level = false;
     }
     s->mit_ide = 0;
-    s->mit_timer_on = false;
+    s->mit_timer_on = true;
+    timer_mod(s->mit_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1);
 
     /* nc.link_down can't be migrated, so infer link_down according
      * to link status bit in mac_reg[STATUS].
@@ -1595,7 +1609,7 @@ static const VMStateDescription vmstate_e1000 = {
 
 /*
  * EEPROM contents documented in Tables 5-2 and 5-3, pp. 98-102.
- * Note: A valid DevId will be inserted during pci_e1000_init().
+ * Note: A valid DevId will be inserted during pci_e1000_realize().
  */
 static const uint16_t e1000_eeprom_template[64] = {
     0x0000, 0x0000, 0x0000, 0x0000,      0xffff, 0x0000,      0x0000, 0x0000,
@@ -1637,6 +1651,8 @@ pci_e1000_uninit(PCIDevice *dev)
     timer_free(d->autoneg_timer);
     timer_del(d->mit_timer);
     timer_free(d->mit_timer);
+    timer_del(d->flush_queue_timer);
+    timer_free(d->flush_queue_timer);
     qemu_del_nic(d->nic);
 }
 
@@ -1700,6 +1716,8 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
 
     d->autoneg_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, e1000_autoneg_timer, d);
     d->mit_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, e1000_mit_timer, d);
+    d->flush_queue_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                        e1000_flush_queue_timer, d);
 }
 
 static void qdev_e1000_reset(DeviceState *dev)
@@ -1732,7 +1750,7 @@ static void e1000_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-    E1000BaseClass *e = E1000_DEVICE_CLASS(klass);
+    E1000BaseClass *e = E1000_CLASS(klass);
     const E1000Info *info = data;
 
     k->realize = pci_e1000_realize;
@@ -1747,7 +1765,7 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     dc->desc = "Intel Gigabit Ethernet";
     dc->reset = qdev_e1000_reset;
     dc->vmsd = &vmstate_e1000;
-    dc->props = e1000_properties;
+    device_class_set_props(dc, e1000_properties);
 }
 
 static void e1000_instance_init(Object *obj)
@@ -1755,7 +1773,7 @@ static void e1000_instance_init(Object *obj)
     E1000State *n = E1000(obj);
     device_add_bootindex_property(obj, &n->conf.bootindex,
                                   "bootindex", "/ethernet-phy@0",
-                                  DEVICE(n), NULL);
+                                  DEVICE(n));
 }
 
 static const TypeInfo e1000_base_info = {
@@ -1805,7 +1823,6 @@ static void e1000_register_types(void)
         type_info.parent = TYPE_E1000_BASE;
         type_info.class_data = (void *)info;
         type_info.class_init = e1000_class_init;
-        type_info.instance_init = e1000_instance_init;
 
         type_register(&type_info);
     }

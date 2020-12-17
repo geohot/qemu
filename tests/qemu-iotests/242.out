@@ -8,13 +8,15 @@ qemu-img info dump:
 
 image: TEST_IMG
 file format: IMGFMT
-virtual size: 1.0M (1048576 bytes)
+virtual size: 1 MiB (1048576 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     corrupt: false
+    extended l2: false
 
 No bitmap in JSON format output
 
@@ -28,10 +30,11 @@ qemu-img info dump:
 
 image: TEST_IMG
 file format: IMGFMT
-virtual size: 1.0M (1048576 bytes)
+virtual size: 1 MiB (1048576 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     bitmaps:
         [0]:
@@ -40,6 +43,7 @@ Format specific information:
             granularity: 32768
     refcount bits: 16
     corrupt: false
+    extended l2: false
 
 The same bitmaps in JSON format:
 [
@@ -60,10 +64,11 @@ qemu-img info dump:
 
 image: TEST_IMG
 file format: IMGFMT
-virtual size: 1.0M (1048576 bytes)
+virtual size: 1 MiB (1048576 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     bitmaps:
         [0]:
@@ -77,6 +82,7 @@ Format specific information:
             granularity: 65536
     refcount bits: 16
     corrupt: false
+    extended l2: false
 
 The same bitmaps in JSON format:
 [
@@ -100,10 +106,11 @@ qemu-img info dump:
 
 image: TEST_IMG
 file format: IMGFMT
-virtual size: 1.0M (1048576 bytes)
+virtual size: 1 MiB (1048576 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     bitmaps:
         [0]:
@@ -119,6 +126,7 @@ Format specific information:
             granularity: 65536
     refcount bits: 16
     corrupt: false
+    extended l2: false
 
 The same bitmaps in JSON format:
 [
@@ -149,10 +157,11 @@ Unset the unknown bitmap flag '0x4' in the bitmap directory entry:
 
 image: TEST_IMG
 file format: IMGFMT
-virtual size: 1.0M (1048576 bytes)
+virtual size: 1 MiB (1048576 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     bitmaps:
         [0]:
@@ -162,5 +171,6 @@ Format specific information:
             granularity: 16384
     refcount bits: 16
     corrupt: false
+    extended l2: false
 
 Test complete

@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,6 +22,7 @@
 
 #include "qemu/main-loop.h"
 #include "exec/exec-all.h"
+#include "sysemu/kvm.h"
 
 /* Swap temporary saved registers with GPRs */
 static inline void hreg_swap_gpr_tgpr(CPUPPCState *env)
@@ -44,10 +45,11 @@ static inline void hreg_swap_gpr_tgpr(CPUPPCState *env)
 
 static inline void hreg_compute_mem_idx(CPUPPCState *env)
 {
-    /* This is our encoding for server processors. The architecture
+    /*
+     * This is our encoding for server processors. The architecture
      * specifies that there is no such thing as userspace with
-     * translation off, however it appears that MacOS does it and
-     * some 32-bit CPUs support it. Weird...
+     * translation off, however it appears that MacOS does it and some
+     * 32-bit CPUs support it. Weird...
      *
      *   0 = Guest User space virtual mode
      *   1 = Guest Kernel space virtual mode
@@ -101,6 +103,10 @@ static inline void hreg_compute_hflags(CPUPPCState *env)
 
 static inline void cpu_interrupt_exittb(CPUState *cs)
 {
+    if (!kvm_enabled()) {
+        return;
+    }
+
     if (!qemu_mutex_iothread_locked()) {
         qemu_mutex_lock_iothread();
         cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
@@ -115,7 +121,7 @@ static inline int hreg_store_msr(CPUPPCState *env, target_ulong value,
 {
     int excp;
 #if !defined(CONFIG_USER_ONLY)
-    CPUState *cs = CPU(ppc_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 #endif
 
     excp = 0;
@@ -143,7 +149,8 @@ static inline int hreg_store_msr(CPUPPCState *env, target_ulong value,
         /* Change the exception prefix on PowerPC 601 */
         env->excp_prefix = ((value >> MSR_EP) & 1) * 0xFFF00000;
     }
-    /* If PR=1 then EE, IR and DR must be 1
+    /*
+     * If PR=1 then EE, IR and DR must be 1
      *
      * Note: We only enforce this on 64-bit server processors.
      * It appears that:
@@ -152,7 +159,7 @@ static inline int hreg_store_msr(CPUPPCState *env, target_ulong value,
      * - 64-bit embedded implementations do not need any operation to be
      *   performed when PR is set.
      */
-    if ((env->insns_flags & PPC_SEGMENT_64B) && ((value >> MSR_PR) & 1)) {
+    if (is_book3s_arch2x(env) && ((value >> MSR_PR) & 1)) {
         value |= (1 << MSR_EE) | (1 << MSR_DR) | (1 << MSR_IR);
     }
 #endif
@@ -173,7 +180,7 @@ static inline int hreg_store_msr(CPUPPCState *env, target_ulong value,
 #if !defined(CONFIG_USER_ONLY)
 static inline void check_tlb_flush(CPUPPCState *env, bool global)
 {
-    CPUState *cs = CPU(ppc_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     /* Handle global flushes first */
     if (global && (env->tlb_need_flush & TLB_NEED_GLOBAL_FLUSH)) {

@@ -16,40 +16,64 @@
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "qemu/units.h"
+#include "sysemu/tcg.h"
 #include "qemu-version.h"
 #include <sys/syscall.h>
 #include <sys/resource.h>
+#include <sys/shm.h>
 
 #include "qapi/error.h"
 #include "qemu.h"
 #include "qemu/path.h"
+#include "qemu/queue.h"
 #include "qemu/config-file.h"
 #include "qemu/cutils.h"
+#include "qemu/error-report.h"
 #include "qemu/help_option.h"
+#include "qemu/module.h"
+#include "qemu/plugin.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
-#include "tcg.h"
+#include "tcg/tcg.h"
 #include "qemu/timer.h"
 #include "qemu/envlist.h"
+#include "qemu/guest-random.h"
 #include "elf.h"
 #include "trace/control.h"
 #include "target_elf.h"
 #include "cpu_loop-common.h"
-
+#include "crypto/init.h"
+#include "librarymap.h"
+const char *filename;
 char *exec_path;
 
 int singlestep;
-static const char *filename;
 static const char *argv0;
-static int gdbstub_port;
+static const char *gdbstub;
 static envlist_t *envlist;
 static const char *cpu_model;
 static const char *cpu_type;
+static const char *seed_optarg;
 unsigned long mmap_min_addr;
 unsigned long guest_base;
-int have_guest_base;
+bool have_guest_base;
+
+/*
+ * Used to implement backwards-compatibility for the `-strace`, and
+ * QEMU_STRACE options. Without this, the QEMU_LOG can be overwritten by
+ * -strace, or vice versa.
+ */
+static bool enable_strace;
+
+/*
+ * The last log mask given by the user in an environment variable or argument.
+ * Used to support command line arguments overriding environment variables.
+ */
+static int last_log_mask;
 
 /*
  * When running 32-on-64 we should make sure we can fit all of the possible
@@ -69,12 +93,12 @@ int have_guest_base;
       (TARGET_LONG_BITS == 32 || defined(TARGET_ABI32))
 /* There are a number of places where we assign reserved_va to a variable
    of type abi_ulong and expect it to fit.  Avoid the last page.  */
-#   define MAX_RESERVED_VA  (0xfffffffful & TARGET_PAGE_MASK)
+#   define MAX_RESERVED_VA(CPU)  (0xfffffffful & TARGET_PAGE_MASK)
 #  else
-#   define MAX_RESERVED_VA  (1ul << TARGET_VIRT_ADDR_SPACE_BITS)
+#   define MAX_RESERVED_VA(CPU)  (1ul << TARGET_VIRT_ADDR_SPACE_BITS)
 #  endif
 # else
-#  define MAX_RESERVED_VA  0
+#  define MAX_RESERVED_VA(CPU)  0
 # endif
 #endif
 
@@ -89,15 +113,6 @@ const char *qemu_uname_release;
    we allocate a bigger stack. Need a better solution, for example
    by remapping the process stack directly at the right place */
 unsigned long guest_stack_size = 8 * 1024 * 1024UL;
-
-void gemu_log(const char *fmt, ...)
-{
-    va_list ap;
-
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
 
 #if defined(TARGET_I386)
 int cpu_get_pic_interrupt(CPUX86State *env)
@@ -172,11 +187,16 @@ void stop_all_tasks(void)
 void init_task_state(TaskState *ts)
 {
     ts->used = 1;
+    ts->sigaltstack_used = (struct target_sigaltstack) {
+        .ss_sp = 0,
+        .ss_size = 0,
+        .ss_flags = TARGET_SS_DISABLE,
+    };
 }
 
 CPUArchState *cpu_copy(CPUArchState *env)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
+    CPUState *cpu = env_cpu(env);
     CPUState *new_cpu = cpu_create(cpu_type);
     CPUArchState *new_env = new_cpu->env_ptr;
     CPUBreakpoint *bp;
@@ -209,20 +229,16 @@ static void handle_arg_help(const char *arg)
 
 static void handle_arg_log(const char *arg)
 {
-    int mask;
-
-    mask = qemu_str_to_log_mask(arg);
-    if (!mask) {
+    last_log_mask = qemu_str_to_log_mask(arg);
+    if (!last_log_mask) {
         qemu_print_log_usage(stdout);
         exit(EXIT_FAILURE);
     }
-    qemu_log_needs_buffers();
-    qemu_set_log(mask);
 }
 
 static void handle_arg_dfilter(const char *arg)
 {
-    qemu_set_dfilter_ranges(arg, NULL);
+    qemu_set_dfilter_ranges(arg, &error_fatal);
 }
 
 static void handle_arg_log_filename(const char *arg)
@@ -289,20 +305,14 @@ static void handle_arg_pagesize(const char *arg)
     }
 }
 
-static void handle_arg_randseed(const char *arg)
+static void handle_arg_seed(const char *arg)
 {
-    unsigned long long seed;
-
-    if (parse_uint_full(arg, &seed, 0) != 0 || seed > UINT_MAX) {
-        fprintf(stderr, "Invalid seed number: %s\n", arg);
-        exit(EXIT_FAILURE);
-    }
-    srand(seed);
+    seed_optarg = arg;
 }
 
 static void handle_arg_gdb(const char *arg)
 {
-    gdbstub_port = atoi(arg);
+    gdbstub = g_strdup(arg);
 }
 
 static void handle_arg_uname(const char *arg)
@@ -316,7 +326,7 @@ static void handle_arg_cpu(const char *arg)
     if (cpu_model == NULL || is_help_option(cpu_model)) {
         /* XXX: implement xxx_cpu_list for targets that still miss it */
 #if defined(cpu_list)
-        cpu_list(stdout, &fprintf);
+        cpu_list();
 #endif
         exit(EXIT_FAILURE);
     }
@@ -325,7 +335,7 @@ static void handle_arg_cpu(const char *arg)
 static void handle_arg_guest_base(const char *arg)
 {
     guest_base = strtol(arg, NULL, 0);
-    have_guest_base = 1;
+    have_guest_base = true;
 }
 
 static void handle_arg_reserved_va(const char *arg)
@@ -349,8 +359,7 @@ static void handle_arg_reserved_va(const char *arg)
         unsigned long unshifted = reserved_va;
         p++;
         reserved_va <<= shift;
-        if (reserved_va >> shift != unshifted
-            || (MAX_RESERVED_VA && reserved_va > MAX_RESERVED_VA)) {
+        if (reserved_va >> shift != unshifted) {
             fprintf(stderr, "Reserved virtual address too big\n");
             exit(EXIT_FAILURE);
         }
@@ -368,7 +377,7 @@ static void handle_arg_singlestep(const char *arg)
 
 static void handle_arg_strace(const char *arg)
 {
-    do_strace = 1;
+    enable_strace = true;
 }
 
 static void handle_arg_version(const char *arg)
@@ -378,12 +387,26 @@ static void handle_arg_version(const char *arg)
     exit(EXIT_SUCCESS);
 }
 
-static char *trace_file;
 static void handle_arg_trace(const char *arg)
 {
-    g_free(trace_file);
-    trace_file = trace_opt_parse(arg);
+    trace_opt_parse(arg);
 }
+
+#if defined(TARGET_XTENSA)
+static void handle_arg_abi_call0(const char *arg)
+{
+    xtensa_set_abi_call0();
+}
+#endif
+
+static QemuPluginList plugins = QTAILQ_HEAD_INITIALIZER(plugins);
+
+#ifdef CONFIG_PLUGIN
+static void handle_arg_plugin(const char *arg)
+{
+    qemu_plugin_opt_parse(arg, &plugins);
+}
+#endif
 
 struct qemu_argument {
     const char *argv;
@@ -393,6 +416,45 @@ struct qemu_argument {
     const char *example;
     const char *help;
 };
+
+
+
+static void handle_arg_qirachild(const char *arg) {
+  singlestep = 1; // always
+
+  int ret = sscanf(arg, "%d %d %d", &GLOBAL_parent_id, &GLOBAL_start_clnum, &GLOBAL_id);
+  if (ret != 3) {
+    printf("CORRUPT qirachild\n");
+  }
+}
+
+extern int GLOBAL_tracelibraries;
+
+static void handle_arg_tracelibraries(const char *arg) {
+  GLOBAL_tracelibraries = 1;
+}
+
+extern uint64_t GLOBAL_gatetrace;
+static void handle_arg_gatetrace(const char *arg) {
+  GLOBAL_gatetrace = strtoull(arg, NULL, 0);
+}
+
+
+static void handle_arg_krm_no_stack(const char *arg) {
+    krm_stack = 0;
+}
+static void handle_arg_krm_no_mmap(const char *arg) {
+#if HOST_LONG_BITS == 64 && TARGET_ABI_BITS == 64
+    TASK_UNMAPPED_BASE = (1ul << 38);
+    mmap_next_start = (1ul << 38);
+#endif
+}
+static void handle_arg_krm_no_pie(const char *arg) {
+    krm_pie = 0;
+}
+static void handle_arg_krm_no_stack_random(const char *arg) {
+    krm_stack_random = 0;
+}
 
 static const struct qemu_argument arg_table[] = {
     {"h",          "",                 false, handle_arg_help,
@@ -430,14 +492,36 @@ static const struct qemu_argument arg_table[] = {
      "pagesize",   "set the host page size to 'pagesize'"},
     {"singlestep", "QEMU_SINGLESTEP",  false, handle_arg_singlestep,
      "",           "run in singlestep mode"},
+    {"qirachild",  "QIRA_CHILD",  true, handle_arg_qirachild,
+     "",           "parent_id, start_clnum, id"},
+    {"tracelibraries",  "QIRA_TRACELIBRARIES",  false, handle_arg_tracelibraries,
+     "",           ""},
+    {"gatetrace",  "QIRA_GATETRACE",  true, handle_arg_gatetrace,
+     "",           "address to gate starting trace on"},
     {"strace",     "QEMU_STRACE",      false, handle_arg_strace,
      "",           "log system calls"},
-    {"seed",       "QEMU_RAND_SEED",   true,  handle_arg_randseed,
+    {"seed",       "QEMU_RAND_SEED",   true,  handle_arg_seed,
      "",           "Seed for pseudo-random number generator"},
     {"trace",      "QEMU_TRACE",       true,  handle_arg_trace,
      "",           "[[enable=]<pattern>][,events=<file>][,file=<file>]"},
+    {"krm_no_stack", "QEMU_KRM_NO_STACK",     false, handle_arg_krm_no_stack,
+     "",           "krm: disable stack  (do not move move stack to 0x7f0122222000)"},
+    {"krm_no_mmap", "QEMU_KRM_NO_MMAP",     false, handle_arg_krm_no_mmap,
+     "",           "krm: disable mmap (do not set mmap_next_start as 0x7f0211111000 for HOST_LONG_BITS == 64 && TARGET_ABI_BITS == 64 )."},
+    {"krm_no_pie", "QEMU_KRM_NO_PIE",     false, handle_arg_krm_no_pie,
+     "",           "krm: disable pie (do not load pie at 0x555555554000 for elf64 )."},
+    {"krm_no_stack_random", "QEMU_KRM_NO_STACK_RANDOM",     false, handle_arg_krm_no_stack_random,
+     "",           "krm: disable stack random (do not make stack random(AT_RANDOM) non random, ie do not make stack canary = 0xcacacacacacaca00)"},
+#ifdef CONFIG_PLUGIN
+    {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,
+     "",           "[file=]<file>[,arg=<string>]"},
+#endif
     {"version",    "QEMU_VERSION",     false, handle_arg_version,
      "",           "display version information and exit"},
+#if defined(TARGET_XTENSA)
+    {"xtensa-abi-call0", "QEMU_XTENSA_ABI_CALL0", false, handle_arg_abi_call0,
+     "",           "assume CALL0 Xtensa ABI"},
+#endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
 
@@ -599,7 +683,10 @@ int main(int argc, char **argv, char **envp)
     int i;
     int ret;
     int execfd;
+    int log_mask;
+    unsigned long max_reserved_va;
 
+    error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
     qemu_init_cpu_list();
     module_call_init(MODULE_INIT_QOM);
@@ -624,16 +711,24 @@ int main(int argc, char **argv, char **envp)
 
     cpu_model = NULL;
 
-    srand(time(NULL));
-
     qemu_add_opts(&qemu_trace_opts);
+    qemu_plugin_add_opts();
 
     optind = parse_args(argc, argv);
+
+    log_mask = last_log_mask | (enable_strace ? LOG_STRACE : 0);
+    if (log_mask) {
+        qemu_log_needs_buffers();
+        qemu_set_log(log_mask);
+    }
 
     if (!trace_init_backends()) {
         exit(1);
     }
-    trace_init_file(trace_file);
+    trace_init_file();
+    if (qemu_plugin_load_list(&plugins)) {
+        exit(1);
+    }
 
     /* Zero out regs */
     memset(regs, 0, sizeof(struct target_pt_regs));
@@ -650,9 +745,9 @@ int main(int argc, char **argv, char **envp)
 
     execfd = qemu_getauxval(AT_EXECFD);
     if (execfd == 0) {
-        execfd = open(filename, O_RDONLY);
+        execfd = open(exec_path, O_RDONLY);
         if (execfd < 0) {
-            printf("Error while loading %s: %s\n", filename, strerror(errno));
+            printf("Error while loading %s: %s\n", exec_path, strerror(errno));
             _exit(EXIT_FAILURE);
         }
     }
@@ -660,61 +755,51 @@ int main(int argc, char **argv, char **envp)
     if (cpu_model == NULL) {
         cpu_model = cpu_get_model(get_elf_eflags(execfd));
     }
-    cpu_type = parse_cpu_model(cpu_model);
+    cpu_type = parse_cpu_option(cpu_model);
 
     /* init tcg before creating CPUs and to get qemu_host_page_size */
     tcg_exec_init(0);
 
-    /* Reserving *too* much vm space via mmap can run into problems
-       with rlimits, oom due to page table creation, etc.  We will still try it,
-       if directed by the command-line option, but not by default.  */
-    if (HOST_LONG_BITS == 64 &&
-        TARGET_VIRT_ADDR_SPACE_BITS <= 32 &&
-        reserved_va == 0) {
-        /* reserved_va must be aligned with the host page size
-         * as it is used with mmap()
-         */
-        reserved_va = MAX_RESERVED_VA & qemu_host_page_mask;
-    }
-
     cpu = cpu_create(cpu_type);
     env = cpu->env_ptr;
     cpu_reset(cpu);
-
     thread_cpu = cpu;
 
-    if (getenv("QEMU_STRACE")) {
-        do_strace = 1;
+    /*
+     * Reserving too much vm space via mmap can run into problems
+     * with rlimits, oom due to page table creation, etc.  We will
+     * still try it, if directed by the command-line option, but
+     * not by default.
+     */
+    max_reserved_va = MAX_RESERVED_VA(cpu);
+    if (reserved_va != 0) {
+        if (max_reserved_va && reserved_va > max_reserved_va) {
+            fprintf(stderr, "Reserved virtual address too big\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if (HOST_LONG_BITS == 64 && TARGET_VIRT_ADDR_SPACE_BITS <= 32) {
+        /*
+         * reserved_va must be aligned with the host page size
+         * as it is used with mmap()
+         */
+        reserved_va = max_reserved_va & qemu_host_page_mask;
     }
 
-    if (getenv("QEMU_RAND_SEED")) {
-        handle_arg_randseed(getenv("QEMU_RAND_SEED"));
+    {
+        Error *err = NULL;
+        if (seed_optarg != NULL) {
+            qemu_guest_random_seed_main(seed_optarg, &err);
+        } else {
+            qcrypto_init(&err);
+        }
+        if (err) {
+            error_reportf_err(err, "cannot initialize crypto: ");
+            exit(1);
+        }
     }
 
     target_environ = envlist_to_environ(envlist, NULL);
     envlist_free(envlist);
-
-    /*
-     * Now that page sizes are configured in tcg_exec_init() we can do
-     * proper page alignment for guest_base.
-     */
-    guest_base = HOST_PAGE_ALIGN(guest_base);
-
-    if (reserved_va || have_guest_base) {
-        guest_base = init_guest_space(guest_base, reserved_va, 0,
-                                      have_guest_base);
-        if (guest_base == (unsigned long)-1) {
-            fprintf(stderr, "Unable to reserve 0x%lx bytes of virtual address "
-                    "space for use as guest address space (check your virtual "
-                    "memory ulimit setting or reserve less using -R option)\n",
-                    reserved_va);
-            exit(EXIT_FAILURE);
-        }
-
-        if (reserved_va) {
-            mmap_next_start = reserved_va;
-        }
-    }
 
     /*
      * Read in mmap_min_addr kernel parameter.  This value is used
@@ -726,12 +811,24 @@ int main(int argc, char **argv, char **envp)
 
         if ((fp = fopen("/proc/sys/vm/mmap_min_addr", "r")) != NULL) {
             unsigned long tmp;
-            if (fscanf(fp, "%lu", &tmp) == 1) {
+            if (fscanf(fp, "%lu", &tmp) == 1 && tmp != 0) {
                 mmap_min_addr = tmp;
-                qemu_log_mask(CPU_LOG_PAGE, "host mmap_min_addr=0x%lx\n", mmap_min_addr);
+                qemu_log_mask(CPU_LOG_PAGE, "host mmap_min_addr=0x%lx\n",
+                              mmap_min_addr);
             }
             fclose(fp);
         }
+    }
+
+    /*
+     * We prefer to not make NULL pointers accessible to QEMU.
+     * If we're in a chroot with no /proc, fall back to 1 page.
+     */
+    if (mmap_min_addr == 0) {
+        mmap_min_addr = qemu_host_page_size;
+        qemu_log_mask(CPU_LOG_PAGE,
+                      "host mmap_min_addr=0x%lx (fallback)\n",
+                      mmap_min_addr);
     }
 
     /*
@@ -765,10 +862,10 @@ int main(int argc, char **argv, char **envp)
     cpu->opaque = ts;
     task_settid(ts);
 
-    ret = loader_exec(execfd, filename, target_argv, target_environ, regs,
+    ret = loader_exec(execfd, exec_path, target_argv, target_environ, regs,
         info, &bprm);
     if (ret != 0) {
-        printf("Error while loading %s: %s\n", filename, strerror(-ret));
+        printf("Error while loading %s: %s\n", exec_path, strerror(-ret));
         _exit(EXIT_FAILURE);
     }
 
@@ -780,7 +877,7 @@ int main(int argc, char **argv, char **envp)
 
     if (qemu_loglevel_mask(CPU_LOG_PAGE)) {
         qemu_log("guest_base  0x%lx\n", guest_base);
-        log_page_dump();
+        log_page_dump("binary load");
 
         qemu_log("start_brk   0x" TARGET_ABI_FMT_lx "\n", info->start_brk);
         qemu_log("end_code    0x" TARGET_ABI_FMT_lx "\n", info->end_code);
@@ -808,10 +905,10 @@ int main(int argc, char **argv, char **envp)
 
     target_cpu_copy_regs(env, regs);
 
-    if (gdbstub_port) {
-        if (gdbserver_start(gdbstub_port) < 0) {
-            fprintf(stderr, "qemu: could not open gdbserver on port %d\n",
-                    gdbstub_port);
+    if (gdbstub) {
+        if (gdbserver_start(gdbstub) < 0) {
+            fprintf(stderr, "qemu: could not open gdbserver on %s\n",
+                    gdbstub);
             exit(EXIT_FAILURE);
         }
         gdb_handlesig(cpu, 0);

@@ -65,35 +65,44 @@ static void sys_cache_info(int *isize, int *dsize)
     g_free(buf);
 }
 
-#elif defined(__APPLE__) \
-      || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#elif defined(__APPLE__)
 # include <sys/sysctl.h>
-# if defined(__APPLE__)
-#  define SYSCTL_CACHELINE_NAME "hw.cachelinesize"
-# else
-#  define SYSCTL_CACHELINE_NAME "machdep.cacheline_size"
-# endif
-
 static void sys_cache_info(int *isize, int *dsize)
 {
     /* There's only a single sysctl for both I/D cache line sizes.  */
     long size;
     size_t len = sizeof(size);
-    if (!sysctlbyname(SYSCTL_CACHELINE_NAME, &size, &len, NULL, 0)) {
+    if (!sysctlbyname("hw.cachelinesize", &size, &len, NULL, 0)) {
         *isize = *dsize = size;
     }
 }
-
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+# include <sys/sysctl.h>
+static void sys_cache_info(int *isize, int *dsize)
+{
+    /* There's only a single sysctl for both I/D cache line sizes.  */
+    int size;
+    size_t len = sizeof(size);
+    if (!sysctlbyname("machdep.cacheline_size", &size, &len, NULL, 0)) {
+        *isize = *dsize = size;
+    }
+}
 #else
 /* POSIX */
 
 static void sys_cache_info(int *isize, int *dsize)
 {
 # ifdef _SC_LEVEL1_ICACHE_LINESIZE
-    *isize = sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
+    int tmp_isize = (int) sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
+    if (tmp_isize > 0) {
+        *isize = tmp_isize;
+    }
 # endif
 # ifdef _SC_LEVEL1_DCACHE_LINESIZE
-    *dsize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    int tmp_dsize = (int) sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (tmp_dsize > 0) {
+        *dsize = tmp_dsize;
+    }
 # endif
 }
 #endif /* sys_cache_info */
@@ -107,7 +116,7 @@ static void sys_cache_info(int *isize, int *dsize)
 static void arch_cache_info(int *isize, int *dsize)
 {
     if (*isize == 0 || *dsize == 0) {
-        unsigned long ctr;
+        uint64_t ctr;
 
         /* The real cache geometry is in CCSIDR_EL1/CLIDR_EL1/CSSELR_EL1,
            but (at least under Linux) these are marked protected by the
@@ -184,5 +193,5 @@ static void __attribute__((constructor)) init_cache_info(void)
     qemu_dcache_linesize = dsize;
     qemu_dcache_linesize_log = ctz32(dsize);
 
-    atomic64_init();
+    qatomic64_init();
 }

@@ -10,14 +10,8 @@
  *
  */
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "kvm_i386.h"
-
-bool kvm_allows_irq0_override(void)
-{
-    return 1;
-}
 
 #ifndef __OPTIMIZE__
 bool kvm_has_smm(void)

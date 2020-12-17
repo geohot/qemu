@@ -34,7 +34,7 @@ config PCI_TESTDEV
 config EDU
     bool
     default y if TEST_DEVICES
-    depends on PCI
+    depends on PCI && MSI_NONBROKEN
 
 config PCA9552
     bool
@@ -67,7 +67,7 @@ config MACIO
 config IVSHMEM_DEVICE
     bool
     default y if PCI_DEVICES
-    depends on PCI && LINUX && IVSHMEM
+    depends on PCI && LINUX && IVSHMEM && MSI_NONBROKEN
 
 config ECCMEMCTL
     bool
@@ -76,8 +76,16 @@ config ECCMEMCTL
 config IMX
     bool
     select PTIMER
+    select SSI
+    select USB_EHCI_SYSBUS
 
 config STM32F2XX_SYSCFG
+    bool
+
+config STM32F4XX_SYSCFG
+    bool
+
+config STM32F4XX_EXTI
     bool
 
 config MIPS_ITU
@@ -85,9 +93,11 @@ config MIPS_ITU
 
 config MPS2_FPGAIO
     bool
+    select LED
 
 config MPS2_SCC
     bool
+    select LED
 
 config TZ_MPC
     bool
@@ -114,5 +124,40 @@ config PVPANIC
 config AUX
     bool
     select I2C
+
+config UNIMP
+    bool
+
+config LED
+    bool
+
+config MAC_VIA
+    bool
+    select MOS6522
+    select ADB
+
+config AVR_POWER
+    bool
+
+config MCHP_PFSOC_DMC
+    bool
+
+config MCHP_PFSOC_IOSCB
+    bool
+
+config MCHP_PFSOC_SYSREG
+    bool
+
+config SIFIVE_TEST
+    bool
+
+config SIFIVE_E_PRCI
+    bool
+
+config SIFIVE_U_OTP
+    bool
+
+config SIFIVE_U_PRCI
+    bool
 
 source macio/Kconfig

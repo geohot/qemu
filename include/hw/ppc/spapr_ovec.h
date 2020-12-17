@@ -33,11 +33,11 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
-#ifndef _SPAPR_OVEC_H
-#define _SPAPR_OVEC_H
+
+#ifndef SPAPR_OVEC_H
+#define SPAPR_OVEC_H
 
 #include "cpu.h"
-#include "migration/vmstate.h"
 
 typedef struct SpaprOptionVector SpaprOptionVector;
 
@@ -66,18 +66,16 @@ SpaprOptionVector *spapr_ovec_clone(SpaprOptionVector *ov_orig);
 void spapr_ovec_intersect(SpaprOptionVector *ov,
                           SpaprOptionVector *ov1,
                           SpaprOptionVector *ov2);
-bool spapr_ovec_diff(SpaprOptionVector *ov,
-                     SpaprOptionVector *ov_old,
-                     SpaprOptionVector *ov_new);
+bool spapr_ovec_subset(SpaprOptionVector *ov1, SpaprOptionVector *ov2);
 void spapr_ovec_cleanup(SpaprOptionVector *ov);
 void spapr_ovec_set(SpaprOptionVector *ov, long bitnr);
 void spapr_ovec_clear(SpaprOptionVector *ov, long bitnr);
 bool spapr_ovec_test(SpaprOptionVector *ov, long bitnr);
 SpaprOptionVector *spapr_ovec_parse_vector(target_ulong table_addr, int vector);
-int spapr_ovec_populate_dt(void *fdt, int fdt_offset,
-                           SpaprOptionVector *ov, const char *name);
+int spapr_dt_ovec(void *fdt, int fdt_offset,
+                  SpaprOptionVector *ov, const char *name);
 
 /* migration */
 extern const VMStateDescription vmstate_spapr_ovec;
 
-#endif /* !defined (_SPAPR_OVEC_H) */
+#endif /* SPAPR_OVEC_H */

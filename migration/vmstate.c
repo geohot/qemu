@@ -11,7 +11,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "migration.h"
 #include "migration/vmstate.h"
 #include "savevm.h"
@@ -33,13 +32,13 @@ static int vmstate_n_elems(void *opaque, const VMStateField *field)
     if (field->flags & VMS_ARRAY) {
         n_elems = field->num;
     } else if (field->flags & VMS_VARRAY_INT32) {
-        n_elems = *(int32_t *)(opaque+field->num_offset);
+        n_elems = *(int32_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT32) {
-        n_elems = *(uint32_t *)(opaque+field->num_offset);
+        n_elems = *(uint32_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT16) {
-        n_elems = *(uint16_t *)(opaque+field->num_offset);
+        n_elems = *(uint16_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT8) {
-        n_elems = *(uint8_t *)(opaque+field->num_offset);
+        n_elems = *(uint8_t *)(opaque + field->num_offset);
     }
 
     if (field->flags & VMS_MULTIPLY_ELEMENTS) {
@@ -55,7 +54,7 @@ static int vmstate_size(void *opaque, const VMStateField *field)
     int size = field->size;
 
     if (field->flags & VMS_VBUFFER) {
-        size = *(int32_t *)(opaque+field->size_offset);
+        size = *(int32_t *)(opaque + field->size_offset);
         if (field->flags & VMS_MULTIPLY) {
             size *= field->size;
         }
@@ -363,7 +362,6 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
             }
             for (i = 0; i < n_elems; i++) {
                 void *curr_elem = first_elem + size * i;
-                ret = 0;
 
                 vmsd_desc_field_start(vmsd, vmdesc_loop, field, i, n_elems);
                 old_offset = qemu_ftell_fast(f);
@@ -496,7 +494,7 @@ static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
                                    void *opaque, QJSON *vmdesc)
 {
     const VMStateDescription **sub = vmsd->subsections;
-    bool subsection_found = false;
+    bool vmdesc_has_subsections = false;
     int ret = 0;
 
     trace_vmstate_subsection_save_top(vmsd->name);
@@ -508,9 +506,9 @@ static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
             trace_vmstate_subsection_save_loop(vmsd->name, vmsdsub->name);
             if (vmdesc) {
                 /* Only create subsection array when we have any */
-                if (!subsection_found) {
+                if (!vmdesc_has_subsections) {
                     json_start_array(vmdesc, "subsections");
-                    subsection_found = true;
+                    vmdesc_has_subsections = true;
                 }
 
                 json_start_object(vmdesc, NULL);
@@ -533,7 +531,7 @@ static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
         sub++;
     }
 
-    if (vmdesc && subsection_found) {
+    if (vmdesc_has_subsections) {
         json_end_array(vmdesc);
     }
 

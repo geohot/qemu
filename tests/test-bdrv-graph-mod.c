@@ -20,16 +20,17 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/main-loop.h"
 #include "block/block_int.h"
 #include "sysemu/block-backend.h"
 
 static BlockDriver bdrv_pass_through = {
     .format_name = "pass-through",
-    .bdrv_child_perm = bdrv_filter_default_perms,
+    .bdrv_child_perm = bdrv_default_perms,
 };
 
 static void no_perm_default_perms(BlockDriverState *bs, BdrvChild *c,
-                                         const BdrvChildRole *role,
+                                         BdrvChildRole role,
                                          BlockReopenQueue *reopen_queue,
                                          uint64_t perm, uint64_t shared,
                                          uint64_t *nperm, uint64_t *nshared)
@@ -102,21 +103,20 @@ static void test_update_perm_tree(void)
 {
     Error *local_err = NULL;
 
-    BlockBackend *root = blk_new(BLK_PERM_WRITE | BLK_PERM_CONSISTENT_READ,
+    BlockBackend *root = blk_new(qemu_get_aio_context(),
+                                 BLK_PERM_WRITE | BLK_PERM_CONSISTENT_READ,
                                  BLK_PERM_ALL & ~BLK_PERM_WRITE);
     BlockDriverState *bs = no_perm_node("node");
     BlockDriverState *filter = pass_through_node("filter");
 
     blk_insert_bs(root, bs, &error_abort);
 
-    bdrv_attach_child(filter, bs, "child", &child_file, &error_abort);
+    bdrv_attach_child(filter, bs, "child", &child_of_bds,
+                      BDRV_CHILD_FILTERED | BDRV_CHILD_PRIMARY, &error_abort);
 
     bdrv_append(filter, bs, &local_err);
+    error_free_or_abort(&local_err);
 
-    g_assert_nonnull(local_err);
-    error_free(local_err);
-
-    bdrv_unref(bs);
     blk_unref(root);
 }
 
@@ -166,7 +166,7 @@ static void test_update_perm_tree(void)
  */
 static void test_should_update_child(void)
 {
-    BlockBackend *root = blk_new(0, BLK_PERM_ALL);
+    BlockBackend *root = blk_new(qemu_get_aio_context(), 0, BLK_PERM_ALL);
     BlockDriverState *bs = no_perm_node("node");
     BlockDriverState *filter = no_perm_node("filter");
     BlockDriverState *target = no_perm_node("target");
@@ -176,7 +176,8 @@ static void test_should_update_child(void)
     bdrv_set_backing_hd(target, bs, &error_abort);
 
     g_assert(target->backing->bs == bs);
-    bdrv_attach_child(filter, target, "target", &child_file, &error_abort);
+    bdrv_attach_child(filter, target, "target", &child_of_bds,
+                      BDRV_CHILD_DATA, &error_abort);
     bdrv_append(filter, bs, &error_abort);
     g_assert(target->backing->bs == bs);
 

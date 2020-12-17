@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,37 +37,37 @@
 # define LOG_PCALL_STATE(cpu) do { } while (0)
 #endif
 
-#ifdef CONFIG_USER_ONLY
-#define MEMSUFFIX _kernel
-#define DATA_SIZE 1
-#include "exec/cpu_ldst_useronly_template.h"
+/*
+ * TODO: Convert callers to compute cpu_mmu_index_kernel once
+ * and use *_mmuidx_ra directly.
+ */
+#define cpu_ldub_kernel_ra(e, p, r) \
+    cpu_ldub_mmuidx_ra(e, p, cpu_mmu_index_kernel(e), r)
+#define cpu_lduw_kernel_ra(e, p, r) \
+    cpu_lduw_mmuidx_ra(e, p, cpu_mmu_index_kernel(e), r)
+#define cpu_ldl_kernel_ra(e, p, r) \
+    cpu_ldl_mmuidx_ra(e, p, cpu_mmu_index_kernel(e), r)
+#define cpu_ldq_kernel_ra(e, p, r) \
+    cpu_ldq_mmuidx_ra(e, p, cpu_mmu_index_kernel(e), r)
 
-#define DATA_SIZE 2
-#include "exec/cpu_ldst_useronly_template.h"
+#define cpu_stb_kernel_ra(e, p, v, r) \
+    cpu_stb_mmuidx_ra(e, p, v, cpu_mmu_index_kernel(e), r)
+#define cpu_stw_kernel_ra(e, p, v, r) \
+    cpu_stw_mmuidx_ra(e, p, v, cpu_mmu_index_kernel(e), r)
+#define cpu_stl_kernel_ra(e, p, v, r) \
+    cpu_stl_mmuidx_ra(e, p, v, cpu_mmu_index_kernel(e), r)
+#define cpu_stq_kernel_ra(e, p, v, r) \
+    cpu_stq_mmuidx_ra(e, p, v, cpu_mmu_index_kernel(e), r)
 
-#define DATA_SIZE 4
-#include "exec/cpu_ldst_useronly_template.h"
+#define cpu_ldub_kernel(e, p)    cpu_ldub_kernel_ra(e, p, 0)
+#define cpu_lduw_kernel(e, p)    cpu_lduw_kernel_ra(e, p, 0)
+#define cpu_ldl_kernel(e, p)     cpu_ldl_kernel_ra(e, p, 0)
+#define cpu_ldq_kernel(e, p)     cpu_ldq_kernel_ra(e, p, 0)
 
-#define DATA_SIZE 8
-#include "exec/cpu_ldst_useronly_template.h"
-#undef MEMSUFFIX
-#else
-#define CPU_MMU_INDEX (cpu_mmu_index_kernel(env))
-#define MEMSUFFIX _kernel
-#define DATA_SIZE 1
-#include "exec/cpu_ldst_template.h"
-
-#define DATA_SIZE 2
-#include "exec/cpu_ldst_template.h"
-
-#define DATA_SIZE 4
-#include "exec/cpu_ldst_template.h"
-
-#define DATA_SIZE 8
-#include "exec/cpu_ldst_template.h"
-#undef CPU_MMU_INDEX
-#undef MEMSUFFIX
-#endif
+#define cpu_stb_kernel(e, p, v)  cpu_stb_kernel_ra(e, p, v, 0)
+#define cpu_stw_kernel(e, p, v)  cpu_stw_kernel_ra(e, p, v, 0)
+#define cpu_stl_kernel(e, p, v)  cpu_stl_kernel_ra(e, p, v, 0)
+#define cpu_stq_kernel(e, p, v)  cpu_stq_kernel_ra(e, p, v, 0)
 
 /* return non zero if error */
 static inline int load_segment_ra(CPUX86State *env, uint32_t *e1_ptr,
@@ -137,7 +137,7 @@ static inline void get_ss_esp_from_tss(CPUX86State *env, uint32_t *ss_ptr,
                                        uint32_t *esp_ptr, int dpl,
                                        uintptr_t retaddr)
 {
-    X86CPU *cpu = x86_env_get_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
     int type, index, shift;
 
 #if 0
@@ -830,7 +830,7 @@ static void do_interrupt_protected(CPUX86State *env, int intno, int is_int,
 
 static inline target_ulong get_rsp_from_tss(CPUX86State *env, int level)
 {
-    X86CPU *cpu = x86_env_get_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
     int index;
 
 #if 0
@@ -972,9 +972,10 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
 #if defined(CONFIG_USER_ONLY)
 void helper_syscall(CPUX86State *env, int next_eip_addend)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     cs->exception_index = EXCP_SYSCALL;
+    env->exception_is_int = 0;
     env->exception_next_eip = env->eip + next_eip_addend;
     cpu_loop_exit(cs);
 }
@@ -1172,7 +1173,7 @@ static void do_interrupt_user(CPUX86State *env, int intno, int is_int,
 static void handle_even_inj(CPUX86State *env, int intno, int is_int,
                             int error_code, int is_hw, int rm)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
     uint32_t event_inj = x86_ldl_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
                                                           control.event_inj));
 
@@ -1312,7 +1313,7 @@ void x86_cpu_do_interrupt(CPUState *cs)
 
 void do_interrupt_x86_hardirq(CPUX86State *env, int intno, int is_hw)
 {
-    do_interrupt_all(x86_env_get_cpu(env), intno, 0, 0, 0, is_hw);
+    do_interrupt_all(env_archcpu(env), intno, 0, 0, 0, is_hw);
 }
 
 bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -1763,7 +1764,7 @@ void helper_lcall_protected(CPUX86State *env, int new_cs, target_ulong new_eip,
     target_ulong ssp, old_ssp, offset, sp;
 
     LOG_PCALL("lcall %04x:" TARGET_FMT_lx " s=%d\n", new_cs, new_eip, shift);
-    LOG_PCALL_STATE(CPU(x86_env_get_cpu(env)));
+    LOG_PCALL_STATE(env_cpu(env));
     if ((new_cs & 0xfffc) == 0) {
         raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
     }
@@ -2167,7 +2168,7 @@ static inline void helper_ret_protected(CPUX86State *env, int shift,
     }
     LOG_PCALL("lret new %04x:" TARGET_FMT_lx " s=%d addend=0x%x\n",
               new_cs, new_eip, shift, addend);
-    LOG_PCALL_STATE(CPU(x86_env_get_cpu(env)));
+    LOG_PCALL_STATE(env_cpu(env));
     if ((new_cs & 0xfffc) == 0) {
         raise_exception_err_ra(env, EXCP0D_GPF, new_cs & 0xfffc, retaddr);
     }

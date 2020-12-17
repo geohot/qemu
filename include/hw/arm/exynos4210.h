@@ -19,15 +19,15 @@
  *
  *  You should have received a copy of the GNU General Public License along
  *  with this program; if not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #ifndef EXYNOS4210_H
 #define EXYNOS4210_H
 
-#include "qemu-common.h"
-#include "exec/memory.h"
+#include "hw/or-irq.h"
+#include "hw/sysbus.h"
 #include "target/arm/cpu-qom.h"
+#include "qom/object.h"
 
 #define EXYNOS4210_NCPUS                    2
 
@@ -76,6 +76,8 @@
 
 #define EXYNOS4210_I2C_NUMBER               9
 
+#define EXYNOS4210_NUM_DMA      3
+
 typedef struct Exynos4210Irq {
     qemu_irq int_combiner_irq[EXYNOS4210_MAX_INT_COMBINER_IN_IRQ];
     qemu_irq ext_combiner_irq[EXYNOS4210_MAX_EXT_COMBINER_IN_IRQ];
@@ -84,7 +86,10 @@ typedef struct Exynos4210Irq {
     qemu_irq board_irqs[EXYNOS4210_MAX_INT_COMBINER_IN_IRQ];
 } Exynos4210Irq;
 
-typedef struct Exynos4210State {
+struct Exynos4210State {
+    /*< private >*/
+    SysBusDevice parent_obj;
+    /*< public >*/
     ARMCPU *cpu[EXYNOS4210_NCPUS];
     Exynos4210Irq irqs;
     qemu_irq *irq_table;
@@ -96,12 +101,14 @@ typedef struct Exynos4210State {
     MemoryRegion boot_secondary;
     MemoryRegion bootreg_mem;
     I2CBus *i2c_if[EXYNOS4210_I2C_NUMBER];
-} Exynos4210State;
+    qemu_or_irq pl330_irq_orgate[EXYNOS4210_NUM_DMA];
+};
+
+#define TYPE_EXYNOS4210_SOC "exynos4210"
+OBJECT_DECLARE_SIMPLE_TYPE(Exynos4210State, EXYNOS4210_SOC)
 
 void exynos4210_write_secondary(ARMCPU *cpu,
         const struct arm_boot_info *info);
-
-Exynos4210State *exynos4210_init(MemoryRegion *system_mem);
 
 /* Initialize exynos4210 IRQ subsystem stub */
 qemu_irq *exynos4210_init_irq(Exynos4210Irq *env);

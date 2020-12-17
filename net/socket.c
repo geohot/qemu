@@ -119,9 +119,13 @@ static ssize_t net_socket_receive_dgram(NetClientState *nc, const uint8_t *buf, 
     ssize_t ret;
 
     do {
-        ret = qemu_sendto(s->fd, buf, size, 0,
-                          (struct sockaddr *)&s->dgram_dst,
-                          sizeof(s->dgram_dst));
+        if (s->dgram_dst.sin_family != AF_UNIX) {
+            ret = qemu_sendto(s->fd, buf, size, 0,
+                              (struct sockaddr *)&s->dgram_dst,
+                              sizeof(s->dgram_dst));
+        } else {
+            ret = send(s->fd, buf, size, 0);
+        }
     } while (ret == -1 && errno == EINTR);
 
     if (ret == -1 && errno == EAGAIN) {
@@ -336,6 +340,15 @@ static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
     int newfd;
     NetClientState *nc;
     NetSocketState *s;
+    SocketAddress *sa;
+    SocketAddressType sa_type;
+
+    sa = socket_local_address(fd, errp);
+    if (!sa) {
+        return NULL;
+    }
+    sa_type = sa->type;
+    qapi_free_SocketAddress(sa);
 
     /* fd passed: multicast: "learn" dgram_dst address from bound address and save it
      * Because this may be "shared" socket from a "master" process, datagrams would be recv()
@@ -379,8 +392,12 @@ static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
                  "socket: fd=%d (cloned mcast=%s:%d)",
                  fd, inet_ntoa(saddr.sin_addr), ntohs(saddr.sin_port));
     } else {
+        if (sa_type == SOCKET_ADDRESS_TYPE_UNIX) {
+            s->dgram_dst.sin_family = AF_UNIX;
+        }
+
         snprintf(nc->info_str, sizeof(nc->info_str),
-                 "socket: fd=%d", fd);
+                 "socket: fd=%d %s", fd, SocketAddressType_str(sa_type));
     }
 
     return s;
@@ -708,13 +725,18 @@ int net_init_socket(const Netdev *netdev, const char *name,
     }
 
     if (sock->has_fd) {
-        int fd;
+        int fd, ret;
 
-        fd = monitor_fd_param(cur_mon, sock->fd, errp);
+        fd = monitor_fd_param(monitor_cur(), sock->fd, errp);
         if (fd == -1) {
             return -1;
         }
-        qemu_set_nonblock(fd);
+        ret = qemu_try_set_nonblock(fd);
+        if (ret < 0) {
+            error_setg_errno(errp, -ret, "%s: Can't use file descriptor %d",
+                             name, fd);
+            return -1;
+        }
         if (!net_socket_fd_init(peer, "socket", name, fd, 1, sock->mcast,
                                 errp)) {
             return -1;

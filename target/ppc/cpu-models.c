@@ -8,7 +8,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,6 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "qemu/module.h"
 #include "cpu-models.h"
 
 #if defined(CONFIG_USER_ONLY)
@@ -740,7 +741,7 @@
     POWERPC_DEF("7457a_v1.2",    CPU_POWERPC_74x7A_v12,              7455,
                 "PowerPC 7457A v1.2 (G4)")
     /* 64 bits PowerPC                                                       */
-#if defined (TARGET_PPC64)
+#if defined(TARGET_PPC64)
     POWERPC_DEF("970_v2.2",      CPU_POWERPC_970_v22,                970,
                 "PowerPC 970 v2.2")
     POWERPC_DEF("970fx_v1.0",    CPU_POWERPC_970FX_v10,              970,
@@ -773,6 +774,8 @@
                 "POWER9 v1.0")
     POWERPC_DEF("power9_v2.0",   CPU_POWERPC_POWER9_DD20,            POWER9,
                 "POWER9 v2.0")
+    POWERPC_DEF("power10_v1.0",  CPU_POWERPC_POWER10_DD1,            POWER10,
+                "POWER10 v1.0")
 #endif /* defined (TARGET_PPC64) */
 
 /***************************************************************************/
@@ -949,6 +952,7 @@ PowerPCCPUAlias ppc_cpu_aliases[] = {
     { "power8", "power8_v2.0" },
     { "power8nvl", "power8nvl_v1.0" },
     { "power9", "power9_v2.0" },
+    { "power10", "power10_v1.0" },
 #endif
 
     /* Generic PowerPCs */

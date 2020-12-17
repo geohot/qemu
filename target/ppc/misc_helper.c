@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,11 +16,13 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 
 #include "helper_regs.h"
 
@@ -39,6 +41,18 @@ void helper_store_dump_spr(CPUPPCState *env, uint32_t sprn)
 }
 
 #ifdef TARGET_PPC64
+static void raise_hv_fu_exception(CPUPPCState *env, uint32_t bit,
+                                  const char *caller, uint32_t cause,
+                                  uintptr_t raddr)
+{
+    qemu_log_mask(CPU_LOG_INT, "HV Facility %d is unavailable (%s)\n",
+                  bit, caller);
+
+    env->spr[SPR_HFSCR] &= ~((target_ulong)FSCR_IC_MASK << FSCR_IC_POS);
+
+    raise_exception_err_ra(env, POWERPC_EXCP_HV_FU, cause, raddr);
+}
+
 static void raise_fu_exception(CPUPPCState *env, uint32_t bit,
                                uint32_t sprn, uint32_t cause,
                                uintptr_t raddr)
@@ -52,6 +66,17 @@ static void raise_fu_exception(CPUPPCState *env, uint32_t bit,
     raise_exception_err_ra(env, POWERPC_EXCP_FU, 0, raddr);
 }
 #endif
+
+void helper_hfscr_facility_check(CPUPPCState *env, uint32_t bit,
+                                 const char *caller, uint32_t cause)
+{
+#ifdef TARGET_PPC64
+    if ((env->msr_mask & MSR_HVB) && !msr_hv &&
+                                     !(env->spr[SPR_HFSCR] & (1UL << bit))) {
+        raise_hv_fu_exception(env, bit, caller, cause, GETPC());
+    }
+#endif
+}
 
 void helper_fscr_facility_check(CPUPPCState *env, uint32_t bit,
                                 uint32_t sprn, uint32_t cause)
@@ -81,46 +106,78 @@ void helper_msr_facility_check(CPUPPCState *env, uint32_t bit,
 
 void helper_store_sdr1(CPUPPCState *env, target_ulong val)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
-
     if (env->spr[SPR_SDR1] != val) {
         ppc_store_sdr1(env, val);
-        tlb_flush(CPU(cpu));
+        tlb_flush(env_cpu(env));
     }
 }
 
 #if defined(TARGET_PPC64)
 void helper_store_ptcr(CPUPPCState *env, target_ulong val)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
-
     if (env->spr[SPR_PTCR] != val) {
         ppc_store_ptcr(env, val);
-        tlb_flush(CPU(cpu));
+        tlb_flush(env_cpu(env));
     }
 }
 
 void helper_store_pcr(CPUPPCState *env, target_ulong value)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    PowerPCCPU *cpu = env_archcpu(env);
     PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
 
     env->spr[SPR_PCR] = value & pcc->pcr_mask;
+}
+
+/*
+ * DPDES register is shared. Each bit reflects the state of the
+ * doorbell interrupt of a thread of the same core.
+ */
+target_ulong helper_load_dpdes(CPUPPCState *env)
+{
+    target_ulong dpdes = 0;
+
+    helper_hfscr_facility_check(env, HFSCR_MSGP, "load DPDES", HFSCR_IC_MSGP);
+
+    /* TODO: TCG supports only one thread */
+    if (env->pending_interrupts & (1 << PPC_INTERRUPT_DOORBELL)) {
+        dpdes = 1;
+    }
+
+    return dpdes;
+}
+
+void helper_store_dpdes(CPUPPCState *env, target_ulong val)
+{
+    PowerPCCPU *cpu = env_archcpu(env);
+    CPUState *cs = CPU(cpu);
+
+    helper_hfscr_facility_check(env, HFSCR_MSGP, "store DPDES", HFSCR_IC_MSGP);
+
+    /* TODO: TCG supports only one thread */
+    if (val & ~0x1) {
+        qemu_log_mask(LOG_GUEST_ERROR, "Invalid DPDES register value "
+                      TARGET_FMT_lx"\n", val);
+        return;
+    }
+
+    if (val & 0x1) {
+        env->pending_interrupts |= 1 << PPC_INTERRUPT_DOORBELL;
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    } else {
+        env->pending_interrupts &= ~(1 << PPC_INTERRUPT_DOORBELL);
+    }
 }
 #endif /* defined(TARGET_PPC64) */
 
 void helper_store_pidr(CPUPPCState *env, target_ulong val)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
-
     env->spr[SPR_BOOKS_PID] = val;
-    tlb_flush(CPU(cpu));
+    tlb_flush(env_cpu(env));
 }
 
 void helper_store_lpidr(CPUPPCState *env, target_ulong val)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
-
     env->spr[SPR_LPIDR] = val;
 
     /*
@@ -129,7 +186,7 @@ void helper_store_lpidr(CPUPPCState *env, target_ulong val)
      * potentially access and cache entries for the current LPID as
      * well.
      */
-    tlb_flush(CPU(cpu));
+    tlb_flush(env_cpu(env));
 }
 
 void helper_store_hid0_601(CPUPPCState *env, target_ulong val)
@@ -151,12 +208,10 @@ void helper_store_hid0_601(CPUPPCState *env, target_ulong val)
 
 void helper_store_403_pbr(CPUPPCState *env, uint32_t num, target_ulong value)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
-
     if (likely(env->pb[num] != value)) {
         env->pb[num] = value;
         /* Should be optimized */
-        tlb_flush(CPU(cpu));
+        tlb_flush(env_cpu(env));
     }
 }
 
@@ -179,25 +234,20 @@ target_ulong helper_clcs(CPUPPCState *env, uint32_t arg)
     case 0x0CUL:
         /* Instruction cache line size */
         return env->icache_line_size;
-        break;
     case 0x0DUL:
         /* Data cache line size */
         return env->dcache_line_size;
-        break;
     case 0x0EUL:
         /* Minimum cache line size */
         return (env->icache_line_size < env->dcache_line_size) ?
             env->icache_line_size : env->dcache_line_size;
-        break;
     case 0x0FUL:
         /* Maximum cache line size */
         return (env->icache_line_size > env->dcache_line_size) ?
             env->icache_line_size : env->dcache_line_size;
-        break;
     default:
         /* Undefined */
         return 0;
-        break;
     }
 }
 
@@ -210,10 +260,11 @@ void ppc_store_msr(CPUPPCState *env, target_ulong value)
     hreg_store_msr(env, value, 0);
 }
 
-/* This code is lifted from MacOnLinux. It is called whenever
- * THRM1,2 or 3 is read an fixes up the values in such a way
- * that will make MacOS not hang. These registers exist on some
- * 75x and 74xx processors.
+/*
+ * This code is lifted from MacOnLinux. It is called whenever THRM1,2
+ * or 3 is read an fixes up the values in such a way that will make
+ * MacOS not hang. These registers exist on some 75x and 74xx
+ * processors.
  */
 void helper_fixup_thrm(CPUPPCState *env)
 {

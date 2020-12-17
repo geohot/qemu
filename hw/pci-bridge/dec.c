@@ -26,26 +26,19 @@
 #include "qemu/osdep.h"
 #include "dec.h"
 #include "hw/sysbus.h"
+#include "qapi/error.h"
+#include "qemu/module.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
+#include "qom/object.h"
 
-/* debug DEC */
-//#define DEBUG_DEC
+OBJECT_DECLARE_SIMPLE_TYPE(DECState, DEC_21154)
 
-#ifdef DEBUG_DEC
-#define DEC_DPRINTF(fmt, ...)                               \
-    do { printf("DEC: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DEC_DPRINTF(fmt, ...)
-#endif
-
-#define DEC_21154(obj) OBJECT_CHECK(DECState, (obj), TYPE_DEC_21154)
-
-typedef struct DECState {
+struct DECState {
     PCIHostState parent_obj;
-} DECState;
+};
 
 static int dec_map_irq(PCIDevice *pci_dev, int irq_num)
 {
@@ -68,7 +61,7 @@ static void dec_21154_pci_bridge_class_init(ObjectClass *klass, void *data)
     k->vendor_id = PCI_VENDOR_ID_DEC;
     k->device_id = PCI_DEVICE_ID_DEC_21154;
     k->config_write = pci_bridge_write_config;
-    k->is_bridge = 1;
+    k->is_bridge = true;
     dc->desc = "DEC 21154 PCI-PCI bridge";
     dc->reset = pci_bridge_reset;
     dc->vmsd = &vmstate_pci_device;
@@ -90,11 +83,10 @@ PCIBus *pci_dec_21154_init(PCIBus *parent_bus, int devfn)
     PCIDevice *dev;
     PCIBridge *br;
 
-    dev = pci_create_multifunction(parent_bus, devfn, false,
-                                   "dec-21154-p2p-bridge");
+    dev = pci_new_multifunction(devfn, false, "dec-21154-p2p-bridge");
     br = PCI_BRIDGE(dev);
     pci_bridge_map_irq(br, "DEC 21154 PCI-PCI bridge", dec_map_irq);
-    qdev_init_nofail(&dev->qdev);
+    pci_realize_and_unref(dev, parent_bus, &error_fatal);
     return pci_bridge_get_sec_bus(br);
 }
 
@@ -129,7 +121,7 @@ static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_DEC_21154;
     k->revision = 0x02;
     k->class_id = PCI_CLASS_BRIDGE_PCI;
-    k->is_bridge = 1;
+    k->is_bridge = true;
     /*
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.

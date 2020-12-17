@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +24,7 @@
 #include "exec/cpu_ldst.h"
 #include "qemu/int128.h"
 #include "qemu/atomic128.h"
-#include "tcg.h"
+#include "tcg/tcg.h"
 
 void helper_cmpxchg8b_unlocked(CPUX86State *env, target_ulong a0)
 {
@@ -68,7 +68,7 @@ void helper_cmpxchg8b(CPUX86State *env, target_ulong a0)
         uint64_t *haddr = g2h(a0);
         cmpv = cpu_to_le64(cmpv);
         newv = cpu_to_le64(newv);
-        oldv = atomic_cmpxchg__nocheck(haddr, cmpv, newv);
+        oldv = qatomic_cmpxchg__nocheck(haddr, cmpv, newv);
         oldv = le64_to_cpu(oldv);
     }
 #else
@@ -89,7 +89,7 @@ void helper_cmpxchg8b(CPUX86State *env, target_ulong a0)
     }
     CC_SRC = eflags;
 #else
-    cpu_loop_exit_atomic(ENV_GET_CPU(env), GETPC());
+    cpu_loop_exit_atomic(env_cpu(env), GETPC());
 #endif /* CONFIG_ATOMIC64 */
 }
 
@@ -158,7 +158,7 @@ void helper_cmpxchg16b(CPUX86State *env, target_ulong a0)
         }
         CC_SRC = eflags;
     } else {
-        cpu_loop_exit_atomic(ENV_GET_CPU(env), ra);
+        cpu_loop_exit_atomic(env_cpu(env), ra);
     }
 }
 #endif
@@ -191,24 +191,3 @@ void helper_boundl(CPUX86State *env, target_ulong a0, int v)
         raise_exception_ra(env, EXCP05_BOUND, GETPC());
     }
 }
-
-#if !defined(CONFIG_USER_ONLY)
-/* try to fill the TLB and return an exception if error. If retaddr is
- * NULL, it means that the function was called in C code (i.e. not
- * from generated code or from helper.c)
- */
-/* XXX: fix it to restore all registers */
-void tlb_fill(CPUState *cs, target_ulong addr, int size,
-              MMUAccessType access_type, int mmu_idx, uintptr_t retaddr)
-{
-    X86CPU *cpu = X86_CPU(cs);
-    CPUX86State *env = &cpu->env;
-    int ret;
-
-    env->retaddr = retaddr;
-    ret = x86_cpu_handle_mmu_fault(cs, addr, size, access_type, mmu_idx);
-    if (ret) {
-        raise_exception_err_ra(env, cs->exception_index, env->error_code, retaddr);
-    }
-}
-#endif

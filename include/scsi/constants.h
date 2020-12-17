@@ -20,8 +20,8 @@
  * the scsi code for linux.
  */
 
-#ifndef BLOCK_SCSI_H
-#define BLOCK_SCSI_H
+#ifndef SCSI_CONSTANTS_H
+#define SCSI_CONSTANTS_H
 
 /*
  *      SCSI opcodes
@@ -218,6 +218,7 @@
 #define TYPE_ENCLOSURE      0x0d    /* Enclosure Services Device */
 #define TYPE_RBC            0x0e    /* Simplified Direct-Access Device */
 #define TYPE_OSD            0x11    /* Object-storage Device */
+#define TYPE_ZBC            0x14    /* Host-managed Zoned SCSI Device */
 #define TYPE_WLUN           0x1e    /* Well known LUN */
 #define TYPE_NOT_PRESENT    0x1f
 #define TYPE_INACTIVE       0x20

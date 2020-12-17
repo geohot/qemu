@@ -1,16 +1,14 @@
 #ifndef STREAM_H
 #define STREAM_H
 
-#include "qemu-common.h"
 #include "qom/object.h"
 
 /* stream slave. Used until qdev provides a generic way.  */
 #define TYPE_STREAM_SLAVE "stream-slave"
 
-#define STREAM_SLAVE_CLASS(klass) \
-     OBJECT_CLASS_CHECK(StreamSlaveClass, (klass), TYPE_STREAM_SLAVE)
-#define STREAM_SLAVE_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(StreamSlaveClass, (obj), TYPE_STREAM_SLAVE)
+typedef struct StreamSlaveClass StreamSlaveClass;
+DECLARE_CLASS_CHECKERS(StreamSlaveClass, STREAM_SLAVE,
+                       TYPE_STREAM_SLAVE)
 #define STREAM_SLAVE(obj) \
      INTERFACE_CHECK(StreamSlave, (obj), TYPE_STREAM_SLAVE)
 
@@ -18,7 +16,7 @@ typedef struct StreamSlave StreamSlave;
 
 typedef void (*StreamCanPushNotifyFn)(void *opaque);
 
-typedef struct StreamSlaveClass {
+struct StreamSlaveClass {
     InterfaceClass parent;
     /**
      * can push - determine if a stream slave is capable of accepting at least
@@ -40,12 +38,13 @@ typedef struct StreamSlaveClass {
      * @obj: Stream slave to push to
      * @buf: Data to write
      * @len: Maximum number of bytes to write
+     * @eop: End of packet flag
      */
-    size_t (*push)(StreamSlave *obj, unsigned char *buf, size_t len);
-} StreamSlaveClass;
+    size_t (*push)(StreamSlave *obj, unsigned char *buf, size_t len, bool eop);
+};
 
 size_t
-stream_push(StreamSlave *sink, uint8_t *buf, size_t len);
+stream_push(StreamSlave *sink, uint8_t *buf, size_t len, bool eop);
 
 bool
 stream_can_push(StreamSlave *sink, StreamCanPushNotifyFn notify,

@@ -24,8 +24,8 @@
 #include "qemu/osdep.h"
 #include "audio.h"
 #include "audio_int.h"
-#include "qemu-common.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "qapi/qapi-visit-audio.h"
 #include "qapi/visitor-impl.h"
@@ -338,8 +338,13 @@ static AudiodevListEntry *legacy_opt(const char *drvname)
     handle_per_direction(audio_get_pdo_in(e->dev), "QEMU_AUDIO_ADC_");
     handle_per_direction(audio_get_pdo_out(e->dev), "QEMU_AUDIO_DAC_");
 
+    /* Original description: Timer period in HZ (0 - use lowest possible) */
     get_int("QEMU_AUDIO_TIMER_PERIOD",
             &e->dev->timer_period, &e->dev->has_timer_period);
+    if (e->dev->has_timer_period && e->dev->timer_period) {
+        e->dev->timer_period = NANOSECONDS_PER_SECOND / 1000 /
+                               e->dev->timer_period;
+    }
 
     switch (e->dev->driver) {
     case AUDIODEV_DRIVER_ALSA:
@@ -416,11 +421,12 @@ typedef struct {
     GList *path;
 } LegacyPrintVisitor;
 
-static void lv_start_struct(Visitor *v, const char *name, void **obj,
+static bool lv_start_struct(Visitor *v, const char *name, void **obj,
                             size_t size, Error **errp)
 {
     LegacyPrintVisitor *lv = (LegacyPrintVisitor *) v;
     lv->path = g_list_append(lv->path, g_strdup(name));
+    return true;
 }
 
 static void lv_end_struct(Visitor *v, void **obj)
@@ -448,27 +454,30 @@ static void lv_print_key(Visitor *v, const char *name)
     printf("%s=", name);
 }
 
-static void lv_type_int64(Visitor *v, const char *name, int64_t *obj,
+static bool lv_type_int64(Visitor *v, const char *name, int64_t *obj,
                           Error **errp)
 {
     lv_print_key(v, name);
     printf("%" PRIi64, *obj);
+    return true;
 }
 
-static void lv_type_uint64(Visitor *v, const char *name, uint64_t *obj,
+static bool lv_type_uint64(Visitor *v, const char *name, uint64_t *obj,
                            Error **errp)
 {
     lv_print_key(v, name);
     printf("%" PRIu64, *obj);
+    return true;
 }
 
-static void lv_type_bool(Visitor *v, const char *name, bool *obj, Error **errp)
+static bool lv_type_bool(Visitor *v, const char *name, bool *obj, Error **errp)
 {
     lv_print_key(v, name);
     printf("%s", *obj ? "on" : "off");
+    return true;
 }
 
-static void lv_type_str(Visitor *v, const char *name, char **obj, Error **errp)
+static bool lv_type_str(Visitor *v, const char *name, char **obj, Error **errp)
 {
     const char *str = *obj;
     lv_print_key(v, name);
@@ -479,6 +488,7 @@ static void lv_type_str(Visitor *v, const char *name, char **obj, Error **errp)
         }
         putchar(*str++);
     }
+    return true;
 }
 
 static void lv_complete(Visitor *v, void *opaque)

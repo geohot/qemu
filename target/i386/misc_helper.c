@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -70,7 +70,7 @@ target_ulong helper_inw(CPUX86State *env, uint32_t port)
 void helper_outl(CPUX86State *env, uint32_t port, uint32_t data)
 {
 #ifdef CONFIG_USER_ONLY
-    fprintf(stderr, "outw: port=0x%04x, data=%08x\n", port, data);
+    fprintf(stderr, "outl: port=0x%04x, data=%08x\n", port, data);
 #else
     address_space_stl(&address_space_io, port, data,
                       cpu_get_mem_attrs(env), NULL);
@@ -133,7 +133,7 @@ target_ulong helper_read_crN(CPUX86State *env, int reg)
         break;
     case 8:
         if (!(env->hflags2 & HF2_VINTR_MASK)) {
-            val = cpu_get_apic_tpr(x86_env_get_cpu(env)->apic_state);
+            val = cpu_get_apic_tpr(env_archcpu(env)->apic_state);
         } else {
             val = env->v_tpr;
         }
@@ -158,7 +158,7 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
     case 8:
         if (!(env->hflags2 & HF2_VINTR_MASK)) {
             qemu_mutex_lock_iothread();
-            cpu_set_apic_tpr(x86_env_get_cpu(env)->apic_state, t0);
+            cpu_set_apic_tpr(env_archcpu(env)->apic_state, t0);
             qemu_mutex_unlock_iothread();
         }
         env->v_tpr = t0 & 0x0f;
@@ -180,7 +180,7 @@ void helper_lmsw(CPUX86State *env, target_ulong t0)
 
 void helper_invlpg(CPUX86State *env, target_ulong addr)
 {
-    X86CPU *cpu = x86_env_get_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
 
     cpu_svm_check_intercept_param(env, SVM_EXIT_INVLPG, 0, GETPC());
     tlb_flush_page(CPU(cpu), addr);
@@ -247,7 +247,7 @@ void helper_wrmsr(CPUX86State *env)
         env->sysenter_eip = val;
         break;
     case MSR_IA32_APICBASE:
-        cpu_set_apic_base(x86_env_get_cpu(env)->apic_state, val);
+        cpu_set_apic_base(env_archcpu(env)->apic_state, val);
         break;
     case MSR_EFER:
         {
@@ -389,6 +389,7 @@ void helper_wrmsr(CPUX86State *env)
 
 void helper_rdmsr(CPUX86State *env)
 {
+    X86CPU *x86_cpu = env_archcpu(env);
     uint64_t val;
 
     cpu_svm_check_intercept_param(env, SVM_EXIT_MSR, 0, GETPC());
@@ -404,7 +405,7 @@ void helper_rdmsr(CPUX86State *env)
         val = env->sysenter_eip;
         break;
     case MSR_IA32_APICBASE:
-        val = cpu_get_apic_base(x86_env_get_cpu(env)->apic_state);
+        val = cpu_get_apic_base(env_archcpu(env)->apic_state);
         break;
     case MSR_EFER:
         val = env->efer;
@@ -522,6 +523,9 @@ void helper_rdmsr(CPUX86State *env)
     case MSR_IA32_BNDCFGS:
         val = env->msr_bndcfgs;
         break;
+     case MSR_IA32_UCODE_REV:
+        val = x86_cpu->ucode_rev;
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
@@ -561,7 +565,7 @@ static void do_hlt(X86CPU *cpu)
 
 void helper_hlt(CPUX86State *env, int next_eip_addend)
 {
-    X86CPU *cpu = x86_env_get_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
 
     cpu_svm_check_intercept_param(env, SVM_EXIT_HLT, 0, GETPC());
     env->eip += next_eip_addend;
@@ -580,8 +584,8 @@ void helper_monitor(CPUX86State *env, target_ulong ptr)
 
 void helper_mwait(CPUX86State *env, int next_eip_addend)
 {
-    CPUState *cs;
-    X86CPU *cpu;
+    CPUState *cs = env_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
 
     if ((uint32_t)env->regs[R_ECX] != 0) {
         raise_exception_ra(env, EXCP0D_GPF, GETPC());
@@ -589,8 +593,6 @@ void helper_mwait(CPUX86State *env, int next_eip_addend)
     cpu_svm_check_intercept_param(env, SVM_EXIT_MWAIT, 0, GETPC());
     env->eip += next_eip_addend;
 
-    cpu = x86_env_get_cpu(env);
-    cs = CPU(cpu);
     /* XXX: not complete but not completely erroneous */
     if (cs->cpu_index != 0 || CPU_NEXT(cs) != NULL) {
         do_pause(cpu);
@@ -601,7 +603,7 @@ void helper_mwait(CPUX86State *env, int next_eip_addend)
 
 void helper_pause(CPUX86State *env, int next_eip_addend)
 {
-    X86CPU *cpu = x86_env_get_cpu(env);
+    X86CPU *cpu = env_archcpu(env);
 
     cpu_svm_check_intercept_param(env, SVM_EXIT_PAUSE, 0, GETPC());
     env->eip += next_eip_addend;
@@ -611,7 +613,7 @@ void helper_pause(CPUX86State *env, int next_eip_addend)
 
 void helper_debug(CPUX86State *env)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     cs->exception_index = EXCP_DEBUG;
     cpu_loop_exit(cs);
@@ -631,7 +633,7 @@ uint64_t helper_rdpkru(CPUX86State *env, uint32_t ecx)
 
 void helper_wrpkru(CPUX86State *env, uint32_t ecx, uint64_t val)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     if ((env->cr[4] & CR4_PKE_MASK) == 0) {
         raise_exception_err_ra(env, EXCP06_ILLOP, 0, GETPC());

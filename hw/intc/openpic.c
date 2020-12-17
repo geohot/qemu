@@ -33,18 +33,22 @@
  * Serial interrupts, as implemented in Raven chipset are not supported yet.
  *
  */
+
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/ppc/mac.h"
 #include "hw/pci/pci.h"
 #include "hw/ppc/openpic.h"
 #include "hw/ppc/ppc_e500.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/pci/msi.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 
@@ -1624,7 +1628,7 @@ static void openpic_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = openpic_realize;
-    dc->props = openpic_properties;
+    device_class_set_props(dc, openpic_properties);
     dc->reset = openpic_reset;
     dc->vmsd = &vmstate_openpic;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);

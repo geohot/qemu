@@ -14,7 +14,6 @@
 #ifndef QTEST_H
 #define QTEST_H
 
-#include "qemu-common.h"
 
 extern bool qtest_allowed;
 
@@ -25,15 +24,12 @@ static inline bool qtest_enabled(void)
 
 bool qtest_driver(void);
 
-void qtest_init(const char *qtest_chrdev, const char *qtest_log, Error **errp);
+void qtest_server_init(const char *qtest_chrdev, const char *qtest_log, Error **errp);
 
-static inline int qtest_available(void)
-{
-#ifdef CONFIG_POSIX
-    return 1;
-#else
-    return 0;
-#endif
-}
+void qtest_server_set_send_handler(void (*send)(void *, const char *),
+                                 void *opaque);
+void qtest_server_inproc_recv(void *opaque, const char *buf);
+
+int64_t qtest_get_virtual_clock(void);
 
 #endif

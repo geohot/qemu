@@ -1,6 +1,4 @@
-
-/* Common header file that is included by all of QEMU.
- *
+/*
  * This file is supposed to be included only by .c files. No header file should
  * depend on qemu-common.h, as this would easily lead to circular header
  * dependencies.
@@ -12,12 +10,10 @@
 #ifndef QEMU_COMMON_H
 #define QEMU_COMMON_H
 
-#include "qemu/fprintf-fn.h"
-
 #define TFR(expr) do { if ((expr) != -1) break; } while (errno == EINTR)
 
 /* Copyright string for -version arguments, About dialogs, etc */
-#define QEMU_COPYRIGHT "Copyright (c) 2003-2019 " \
+#define QEMU_COPYRIGHT "Copyright (c) 2003-2020 " \
     "Fabrice Bellard and the QEMU Project developers"
 
 /* Bug reporting information for --help arguments, About dialogs, etc */
@@ -32,22 +28,6 @@ int qemu_main(int argc, char **argv, char **envp);
 
 void qemu_get_timedate(struct tm *tm, int offset);
 int qemu_timedate_diff(struct tm *tm);
-
-#define qemu_isalnum(c)		isalnum((unsigned char)(c))
-#define qemu_isalpha(c)		isalpha((unsigned char)(c))
-#define qemu_iscntrl(c)		iscntrl((unsigned char)(c))
-#define qemu_isdigit(c)		isdigit((unsigned char)(c))
-#define qemu_isgraph(c)		isgraph((unsigned char)(c))
-#define qemu_islower(c)		islower((unsigned char)(c))
-#define qemu_isprint(c)		isprint((unsigned char)(c))
-#define qemu_ispunct(c)		ispunct((unsigned char)(c))
-#define qemu_isspace(c)		isspace((unsigned char)(c))
-#define qemu_isupper(c)		isupper((unsigned char)(c))
-#define qemu_isxdigit(c)	isxdigit((unsigned char)(c))
-#define qemu_tolower(c)		tolower((unsigned char)(c))
-#define qemu_toupper(c)		toupper((unsigned char)(c))
-#define qemu_isascii(c)		isascii((unsigned char)(c))
-#define qemu_toascii(c)		toascii((unsigned char)(c))
 
 void *qemu_oom_check(void *ptr);
 
@@ -79,14 +59,6 @@ int qemu_openpty_raw(int *aslave, char *pty_name);
     sendto(sockfd, buf, len, flags, destaddr, addrlen)
 #endif
 
-extern bool tcg_allowed;
-void tcg_exec_init(unsigned long tb_size);
-#ifdef CONFIG_TCG
-#define tcg_enabled() (tcg_allowed)
-#else
-#define tcg_enabled() 0
-#endif
-
 void cpu_exec_init_all(void);
 void cpu_exec_step_atomic(CPUState *cpu);
 
@@ -101,6 +73,12 @@ void cpu_exec_step_atomic(CPUState *cpu);
  * choice of page size and the requested page size is smaller than that).
  */
 bool set_preferred_target_page_bits(int bits);
+
+/**
+ * finalize_target_page_bits:
+ * Commit the final value set by set_preferred_target_page_bits.
+ */
+void finalize_target_page_bits(void);
 
 /**
  * Sends a (part of) iovec down a socket, yielding when the socket is full, or
@@ -132,20 +110,43 @@ const char *qemu_get_vm_name(void);
 
 #define QEMU_FILE_TYPE_BIOS   0
 #define QEMU_FILE_TYPE_KEYMAP 1
+/**
+ * qemu_find_file:
+ * @type: QEMU_FILE_TYPE_BIOS (for BIOS, VGA BIOS)
+ *        or QEMU_FILE_TYPE_KEYMAP (for keymaps).
+ * @name: Relative or absolute file name
+ *
+ * If @name exists on disk as an absolute path, or a path relative
+ * to the current directory, then returns @name unchanged.
+ * Otherwise searches for @name file in the data directories, either
+ * configured at build time (DATADIR) or registered with the -L command
+ * line option.
+ *
+ * The caller must use g_free() to free the returned data when it is
+ * no longer required.
+ *
+ * Returns: a path that can access @name, or NULL if no matching file exists.
+ */
 char *qemu_find_file(int type, const char *name);
 
 /* OS specific functions */
 void os_setup_early_signal_handling(void);
-char *os_find_datadir(void);
 int os_parse_cmd_args(int index, const char *optarg);
 
-#include "qemu/module.h"
+/*
+ * Hexdump a line of a byte buffer into a hexadecimal/ASCII buffer
+ */
+#define QEMU_HEXDUMP_LINE_BYTES 16 /* Number of bytes to dump */
+#define QEMU_HEXDUMP_LINE_LEN 75   /* Number of characters in line */
+void qemu_hexdump_line(char *line, unsigned int b, const void *bufptr,
+                       unsigned int len, bool ascii);
 
 /*
  * Hexdump a buffer to a file. An optional string prefix is added to every line
  */
 
-void qemu_hexdump(const char *buf, FILE *fp, const char *prefix, size_t size);
+void qemu_hexdump(FILE *fp, const char *prefix,
+                  const void *bufptr, size_t size);
 
 /*
  * helper to parse debug environment variables
@@ -153,7 +154,6 @@ void qemu_hexdump(const char *buf, FILE *fp, const char *prefix, size_t size);
 int parse_debug_env(const char *name, int max, int initial);
 
 const char *qemu_ether_ntoa(const MACAddr *mac);
-char *size_to_str(uint64_t val);
 void page_size_init(void);
 
 /* returns non-zero if dump is in progress, otherwise zero is

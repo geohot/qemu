@@ -1,17 +1,18 @@
-#ifndef QEMU_HW_XEN_BACKEND_H
-#define QEMU_HW_XEN_BACKEND_H
+#ifndef HW_XEN_LEGACY_BACKEND_H
+#define HW_XEN_LEGACY_BACKEND_H
 
 #include "hw/xen/xen_common.h"
 #include "hw/xen/xen_pvdev.h"
-#include "sysemu/sysemu.h"
 #include "net/net.h"
+#include "qom/object.h"
 
 #define TYPE_XENSYSDEV "xen-sysdev"
 #define TYPE_XENSYSBUS "xen-sysbus"
 #define TYPE_XENBACKEND "xen-backend"
 
-#define XENBACKEND_DEVICE(obj) \
-    OBJECT_CHECK(XenLegacyDevice, (obj), TYPE_XENBACKEND)
+typedef struct XenLegacyDevice XenLegacyDevice;
+DECLARE_INSTANCE_CHECKER(XenLegacyDevice, XENBACKEND,
+                         TYPE_XENBACKEND)
 
 /* variables */
 extern struct xs_handle *xenstore;
@@ -101,4 +102,4 @@ int xen_config_dev_vfb(int vdev, const char *type);
 int xen_config_dev_vkbd(int vdev);
 int xen_config_dev_console(int vdev);
 
-#endif /* QEMU_HW_XEN_BACKEND_H */
+#endif /* HW_XEN_LEGACY_BACKEND_H */

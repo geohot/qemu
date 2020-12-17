@@ -19,9 +19,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
+#include "qemu/bitops.h"
 #include "ui/console.h"
-#include "hw/devices.h"
+#include "hw/display/blizzard.h"
 #include "ui/pixel_ops.h"
 
 typedef void (*blizzard_fn_t)(uint8_t *, const uint8_t *, unsigned int);
@@ -933,12 +933,9 @@ static void blizzard_draw_line16_32(uint32_t *dest,
     const uint16_t *end = (const void *) src + width;
     while (src < end) {
         data = *src ++;
-        b = (data & 0x1f) << 3;
-        data >>= 5;
-        g = (data & 0x3f) << 2;
-        data >>= 6;
-        r = (data & 0x1f) << 3;
-        data >>= 5;
+        b = extract16(data, 0, 5) << 3;
+        g = extract16(data, 5, 6) << 2;
+        r = extract16(data, 11, 5) << 3;
         *dest++ = rgb_to_pixel32(r, g, b);
     }
 }

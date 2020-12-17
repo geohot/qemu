@@ -21,17 +21,13 @@
 
 #ifndef INTEL_IOMMU_H
 #define INTEL_IOMMU_H
-#include "hw/qdev.h"
-#include "sysemu/dma.h"
+
 #include "hw/i386/x86-iommu.h"
-#include "hw/i386/ioapic.h"
-#include "hw/pci/msi.h"
-#include "hw/sysbus.h"
 #include "qemu/iova-tree.h"
+#include "qom/object.h"
 
 #define TYPE_INTEL_IOMMU_DEVICE "intel-iommu"
-#define INTEL_IOMMU_DEVICE(obj) \
-     OBJECT_CHECK(IntelIOMMUState, (obj), TYPE_INTEL_IOMMU_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(IntelIOMMUState, INTEL_IOMMU_DEVICE)
 
 #define TYPE_INTEL_IOMMU_MEMORY_REGION "intel-iommu-iommu-memory-region"
 
@@ -60,7 +56,6 @@
 
 typedef struct VTDContextEntry VTDContextEntry;
 typedef struct VTDContextCacheEntry VTDContextCacheEntry;
-typedef struct IntelIOMMUState IntelIOMMUState;
 typedef struct VTDAddressSpace VTDAddressSpace;
 typedef struct VTDIOTLBEntry VTDIOTLBEntry;
 typedef struct VTDBus VTDBus;
@@ -105,8 +100,8 @@ struct VTDAddressSpace {
     uint8_t devfn;
     AddressSpace as;
     IOMMUMemoryRegion iommu;
-    MemoryRegion root;
-    MemoryRegion sys_alias;
+    MemoryRegion root;          /* The root container of the device */
+    MemoryRegion nodmar;        /* The alias of shared nodmar MR */
     MemoryRegion iommu_ir;      /* Interrupt region: 0xfeeXXXXX */
     IntelIOMMUState *iommu_state;
     VTDContextCacheEntry context_cache_entry;
@@ -118,7 +113,8 @@ struct VTDAddressSpace {
 
 struct VTDBus {
     PCIBus* bus;		/* A reference to the bus to provide translation for */
-    VTDAddressSpace *dev_as[0];	/* A table of VTDAddressSpace objects indexed by devfn */
+    /* A table of VTDAddressSpace objects indexed by devfn */
+    VTDAddressSpace *dev_as[];
 };
 
 struct VTDIOTLBEntry {
@@ -221,6 +217,9 @@ union VTD_IR_MSIAddress {
 struct IntelIOMMUState {
     X86IOMMUState x86_iommu;
     MemoryRegion csrmem;
+    MemoryRegion mr_nodmar;
+    MemoryRegion mr_ir;
+    MemoryRegion mr_sys_alias;
     uint8_t csr[DMAR_REG_SIZE];     /* register values */
     uint8_t wmask[DMAR_REG_SIZE];   /* R/W bytes */
     uint8_t w1cmask[DMAR_REG_SIZE]; /* RW1C(Write 1 to Clear) bytes */
@@ -231,7 +230,6 @@ struct IntelIOMMUState {
     bool scalable_mode;             /* RO - is Scalable Mode supported? */
 
     dma_addr_t root;                /* Current root table pointer */
-    bool root_extended;             /* Type of root table (extended or not) */
     bool root_scalable;             /* Type of root table (scalable or not) */
     bool dmar_enabled;              /* Set if DMA remapping is enabled */
 

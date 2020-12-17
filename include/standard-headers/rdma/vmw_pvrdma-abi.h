@@ -78,6 +78,7 @@ enum pvrdma_wr_opcode {
 	PVRDMA_WR_MASKED_ATOMIC_FETCH_AND_ADD,
 	PVRDMA_WR_BIND_MW,
 	PVRDMA_WR_REG_SIG_MR,
+	PVRDMA_WR_ERROR,
 };
 
 enum pvrdma_wc_status {
@@ -176,6 +177,11 @@ struct pvrdma_create_qp {
 	uint32_t rbuf_size;
 	uint32_t sbuf_size;
 	uint64_t __attribute__((aligned(8))) qp_addr;
+};
+
+struct pvrdma_create_qp_resp {
+	uint32_t qpn;
+	uint32_t qp_handle;
 };
 
 /* PVRDMA masked atomic compare and swap */

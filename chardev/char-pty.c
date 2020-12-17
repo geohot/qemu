@@ -21,26 +21,32 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "qapi/error.h"
 #include "qemu-common.h"
+#include "qapi/error.h"
 #include "chardev/char.h"
 #include "io/channel-file.h"
 #include "qemu/sockets.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
+#include "qemu/qemu-print.h"
 
 #include "chardev/char-io.h"
+#include "qom/object.h"
 
-typedef struct {
+struct PtyChardev {
     Chardev parent;
     QIOChannel *ioc;
     int read_bytes;
 
     int connected;
     GSource *timer_src;
-} PtyChardev;
+};
+typedef struct PtyChardev PtyChardev;
 
-#define PTY_CHARDEV(obj) OBJECT_CHECK(PtyChardev, (obj), TYPE_CHARDEV_PTY)
+DECLARE_INSTANCE_CHECKER(PtyChardev, PTY_CHARDEV,
+                         TYPE_CHARDEV_PTY)
 
 static void pty_chr_state(Chardev *chr, int connected);
 
@@ -211,8 +217,8 @@ static void char_pty_open(Chardev *chr,
     qemu_set_nonblock(master_fd);
 
     chr->filename = g_strdup_printf("pty:%s", pty_name);
-    error_printf("char device redirected to %s (label %s)\n",
-                 pty_name, chr->label);
+    qemu_printf("char device redirected to %s (label %s)\n",
+                pty_name, chr->label);
 
     s = PTY_CHARDEV(chr);
     s->ioc = QIO_CHANNEL(qio_channel_file_new_fd(master_fd));

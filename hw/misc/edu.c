@@ -25,13 +25,18 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/pci/pci.h"
+#include "hw/hw.h"
 #include "hw/pci/msi.h"
 #include "qemu/timer.h"
+#include "qom/object.h"
 #include "qemu/main-loop.h" /* iothread mutex */
+#include "qemu/module.h"
 #include "qapi/visitor.h"
 
 #define TYPE_PCI_EDU_DEVICE "edu"
-#define EDU(obj)        OBJECT_CHECK(EduState, obj, TYPE_PCI_EDU_DEVICE)
+typedef struct EduState EduState;
+DECLARE_INSTANCE_CHECKER(EduState, EDU,
+                         TYPE_PCI_EDU_DEVICE)
 
 #define FACT_IRQ        0x00000001
 #define DMA_IRQ         0x00000100
@@ -39,7 +44,7 @@
 #define DMA_START       0x40000
 #define DMA_SIZE        4096
 
-typedef struct {
+struct EduState {
     PCIDevice pdev;
     MemoryRegion mmio;
 
@@ -70,7 +75,7 @@ typedef struct {
     QEMUTimer dma_timer;
     char dma_buf[DMA_SIZE];
     uint64_t dma_mask;
-} EduState;
+};
 
 static bool edu_msi_enabled(EduState *edu)
 {
@@ -98,23 +103,24 @@ static void edu_lower_irq(EduState *edu, uint32_t val)
     }
 }
 
-static bool within(uint32_t addr, uint32_t start, uint32_t end)
+static bool within(uint64_t addr, uint64_t start, uint64_t end)
 {
     return start <= addr && addr < end;
 }
 
-static void edu_check_range(uint32_t addr, uint32_t size1, uint32_t start,
-                uint32_t size2)
+static void edu_check_range(uint64_t addr, uint64_t size1, uint64_t start,
+                uint64_t size2)
 {
-    uint32_t end1 = addr + size1;
-    uint32_t end2 = start + size2;
+    uint64_t end1 = addr + size1;
+    uint64_t end2 = start + size2;
 
     if (within(addr, start, end2) &&
             end1 > addr && within(end1, start, end2)) {
         return;
     }
 
-    hw_error("EDU: DMA range 0x%.8x-0x%.8x out of bounds (0x%.8x-0x%.8x)!",
+    hw_error("EDU: DMA range 0x%016"PRIx64"-0x%016"PRIx64
+             " out of bounds (0x%016"PRIx64"-0x%016"PRIx64")!",
             addr, end1 - 1, start, end2 - 1);
 }
 
@@ -139,13 +145,13 @@ static void edu_dma_timer(void *opaque)
     }
 
     if (EDU_DMA_DIR(edu->dma.cmd) == EDU_DMA_FROM_PCI) {
-        uint32_t dst = edu->dma.dst;
+        uint64_t dst = edu->dma.dst;
         edu_check_range(dst, edu->dma.cnt, DMA_START, DMA_SIZE);
         dst -= DMA_START;
         pci_dma_read(&edu->pdev, edu_clamp_addr(edu, edu->dma.src),
                 edu->dma_buf + dst, edu->dma.cnt);
     } else {
-        uint32_t src = edu->dma.src;
+        uint64_t src = edu->dma.src;
         edu_check_range(src, edu->dma.cnt, DMA_START, DMA_SIZE);
         src -= DMA_START;
         pci_dma_write(&edu->pdev, edu_clamp_addr(edu, edu->dma.dst),
@@ -185,7 +191,11 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
     EduState *edu = opaque;
     uint64_t val = ~0ULL;
 
-    if (size != 4) {
+    if (addr < 0x80 && size != 4) {
+        return val;
+    }
+
+    if (addr >= 0x80 && size != 4 && size != 8) {
         return val;
     }
 
@@ -202,7 +212,7 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
         qemu_mutex_unlock(&edu->thr_mutex);
         break;
     case 0x20:
-        val = atomic_read(&edu->status);
+        val = qatomic_read(&edu->status);
         break;
     case 0x24:
         val = edu->irq_status;
@@ -242,7 +252,7 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         edu->addr4 = ~val;
         break;
     case 0x08:
-        if (atomic_read(&edu->status) & EDU_STATUS_COMPUTING) {
+        if (qatomic_read(&edu->status) & EDU_STATUS_COMPUTING) {
             break;
         }
         /* EDU_STATUS_COMPUTING cannot go 0->1 concurrently, because it is only
@@ -250,15 +260,15 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
          */
         qemu_mutex_lock(&edu->thr_mutex);
         edu->fact = val;
-        atomic_or(&edu->status, EDU_STATUS_COMPUTING);
+        qatomic_or(&edu->status, EDU_STATUS_COMPUTING);
         qemu_cond_signal(&edu->thr_cond);
         qemu_mutex_unlock(&edu->thr_mutex);
         break;
     case 0x20:
         if (val & EDU_STATUS_IRQFACT) {
-            atomic_or(&edu->status, EDU_STATUS_IRQFACT);
+            qatomic_or(&edu->status, EDU_STATUS_IRQFACT);
         } else {
-            atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
+            qatomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
         }
         break;
     case 0x60:
@@ -289,6 +299,15 @@ static const MemoryRegionOps edu_mmio_ops = {
     .read = edu_mmio_read,
     .write = edu_mmio_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+
 };
 
 /*
@@ -303,7 +322,7 @@ static void *edu_fact_thread(void *opaque)
         uint32_t val, ret = 1;
 
         qemu_mutex_lock(&edu->thr_mutex);
-        while ((atomic_read(&edu->status) & EDU_STATUS_COMPUTING) == 0 &&
+        while ((qatomic_read(&edu->status) & EDU_STATUS_COMPUTING) == 0 &&
                         !edu->stopping) {
             qemu_cond_wait(&edu->thr_cond, &edu->thr_mutex);
         }
@@ -328,9 +347,9 @@ static void *edu_fact_thread(void *opaque)
         qemu_mutex_lock(&edu->thr_mutex);
         edu->fact = ret;
         qemu_mutex_unlock(&edu->thr_mutex);
-        atomic_and(&edu->status, ~EDU_STATUS_COMPUTING);
+        qatomic_and(&edu->status, ~EDU_STATUS_COMPUTING);
 
-        if (atomic_read(&edu->status) & EDU_STATUS_IRQFACT) {
+        if (qatomic_read(&edu->status) & EDU_STATUS_IRQFACT) {
             qemu_mutex_lock_iothread();
             edu_raise_irq(edu, FACT_IRQ);
             qemu_mutex_unlock_iothread();
@@ -380,21 +399,13 @@ static void pci_edu_uninit(PCIDevice *pdev)
     msi_uninit(pdev);
 }
 
-static void edu_obj_uint64(Object *obj, Visitor *v, const char *name,
-                           void *opaque, Error **errp)
-{
-    uint64_t *val = opaque;
-
-    visit_type_uint64(v, name, val, errp);
-}
-
 static void edu_instance_init(Object *obj)
 {
     EduState *edu = EDU(obj);
 
     edu->dma_mask = (1UL << 28) - 1;
-    object_property_add(obj, "dma_mask", "uint64", edu_obj_uint64,
-                    edu_obj_uint64, NULL, &edu->dma_mask, NULL);
+    object_property_add_uint64_ptr(obj, "dma_mask",
+                                   &edu->dma_mask, OBJ_PROP_FLAG_READWRITE);
 }
 
 static void edu_class_init(ObjectClass *class, void *data)

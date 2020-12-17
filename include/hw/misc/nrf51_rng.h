@@ -30,13 +30,15 @@
  * the COPYING file in the top-level directory.
  *
  */
+
 #ifndef NRF51_RNG_H
 #define NRF51_RNG_H
 
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
+#include "qom/object.h"
 #define TYPE_NRF51_RNG "nrf51_soc.rng"
-#define NRF51_RNG(obj) OBJECT_CHECK(NRF51RNGState, (obj), TYPE_NRF51_RNG)
+OBJECT_DECLARE_SIMPLE_TYPE(NRF51RNGState, NRF51_RNG)
 
 #define NRF51_RNG_SIZE         0x1000
 
@@ -53,7 +55,7 @@
 #define NRF51_RNG_REG_CONFIG_DECEN 0
 #define NRF51_RNG_REG_VALUE    0x508
 
-typedef struct {
+struct NRF51RNGState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
@@ -77,7 +79,7 @@ typedef struct {
     uint32_t interrupt_enabled;
     uint32_t filter_enabled;
 
-} NRF51RNGState;
+};
 
 
-#endif /* NRF51_RNG_H_ */
+#endif /* NRF51_RNG_H */

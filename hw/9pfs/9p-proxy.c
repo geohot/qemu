@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include "qemu-common.h"
 #include "9p.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
@@ -1113,7 +1114,7 @@ static int connect_namedsocket(const char *path, Error **errp)
     return sockfd;
 }
 
-static void error_append_socket_sockfd_hint(Error **errp)
+static void error_append_socket_sockfd_hint(Error *const *errp)
 {
     error_append_hint(errp, "Either specify socket=/some/path where /some/path"
                       " points to a listening AF_UNIX socket or sock_fd=fd"
@@ -1138,10 +1139,10 @@ static int proxy_parse_opts(QemuOpts *opts, FsDriverEntry *fs, Error **errp)
     }
     if (socket) {
         fs->path = g_strdup(socket);
-        fs->export_flags = V9FS_PROXY_SOCK_NAME;
+        fs->export_flags |= V9FS_PROXY_SOCK_NAME;
     } else {
         fs->path = g_strdup(sock_fd);
-        fs->export_flags = V9FS_PROXY_SOCK_FD;
+        fs->export_flags |= V9FS_PROXY_SOCK_FD;
     }
     return 0;
 }
@@ -1183,6 +1184,10 @@ static int proxy_init(FsContext *ctx, Error **errp)
 static void proxy_cleanup(FsContext *ctx)
 {
     V9fsProxy *proxy = ctx->private;
+
+    if (!proxy) {
+        return;
+    }
 
     g_free(proxy->out_iovec.iov_base);
     g_free(proxy->in_iovec.iov_base);

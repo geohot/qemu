@@ -19,8 +19,8 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _RISCV_PMP_H_
-#define _RISCV_PMP_H_
+#ifndef RISCV_PMP_H
+#define RISCV_PMP_H
 
 typedef enum {
     PMP_READ  = 1 << 0,
@@ -59,6 +59,10 @@ void pmpaddr_csr_write(CPURISCVState *env, uint32_t addr_index,
     target_ulong val);
 target_ulong pmpaddr_csr_read(CPURISCVState *env, uint32_t addr_index);
 bool pmp_hart_has_privs(CPURISCVState *env, target_ulong addr,
-    target_ulong size, pmp_priv_t priv);
+    target_ulong size, pmp_priv_t priv, target_ulong mode);
+bool pmp_is_range_in_tlb(CPURISCVState *env, hwaddr tlb_sa,
+                         target_ulong *tlb_size);
+void pmp_update_rule_addr(CPURISCVState *env, uint32_t pmp_index);
+void pmp_update_rule_nums(CPURISCVState *env);
 
 #endif

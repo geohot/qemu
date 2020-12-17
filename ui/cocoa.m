@@ -31,68 +31,23 @@
 #include "ui/console.h"
 #include "ui/input.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/runstate.h"
+#include "sysemu/cpu-throttle.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
+#include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
 #include "sysemu/blockdev.h"
 #include "qemu-version.h"
+#include "qemu/main-loop.h"
+#include "qemu/module.h"
 #include <Carbon/Carbon.h>
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
-#ifndef MAC_OS_X_VERSION_10_5
-#define MAC_OS_X_VERSION_10_5 1050
-#endif
-#ifndef MAC_OS_X_VERSION_10_6
-#define MAC_OS_X_VERSION_10_6 1060
-#endif
-#ifndef MAC_OS_X_VERSION_10_9
-#define MAC_OS_X_VERSION_10_9 1090
-#endif
-#ifndef MAC_OS_X_VERSION_10_10
-#define MAC_OS_X_VERSION_10_10 101000
-#endif
-#ifndef MAC_OS_X_VERSION_10_12
-#define MAC_OS_X_VERSION_10_12 101200
-#endif
 #ifndef MAC_OS_X_VERSION_10_13
 #define MAC_OS_X_VERSION_10_13 101300
 #endif
 
-/* macOS 10.12 deprecated many constants, #define the new names for older SDKs */
-#if MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12
-#define NSEventMaskAny                  NSAnyEventMask
-#define NSEventModifierFlagCapsLock     NSAlphaShiftKeyMask
-#define NSEventModifierFlagShift        NSShiftKeyMask
-#define NSEventModifierFlagCommand      NSCommandKeyMask
-#define NSEventModifierFlagControl      NSControlKeyMask
-#define NSEventModifierFlagOption       NSAlternateKeyMask
-#define NSEventTypeFlagsChanged         NSFlagsChanged
-#define NSEventTypeKeyUp                NSKeyUp
-#define NSEventTypeKeyDown              NSKeyDown
-#define NSEventTypeMouseMoved           NSMouseMoved
-#define NSEventTypeLeftMouseDown        NSLeftMouseDown
-#define NSEventTypeRightMouseDown       NSRightMouseDown
-#define NSEventTypeOtherMouseDown       NSOtherMouseDown
-#define NSEventTypeLeftMouseDragged     NSLeftMouseDragged
-#define NSEventTypeRightMouseDragged    NSRightMouseDragged
-#define NSEventTypeOtherMouseDragged    NSOtherMouseDragged
-#define NSEventTypeLeftMouseUp          NSLeftMouseUp
-#define NSEventTypeRightMouseUp         NSRightMouseUp
-#define NSEventTypeOtherMouseUp         NSOtherMouseUp
-#define NSEventTypeScrollWheel          NSScrollWheel
-#define NSTextAlignmentCenter           NSCenterTextAlignment
-#define NSWindowStyleMaskBorderless     NSBorderlessWindowMask
-#define NSWindowStyleMaskClosable       NSClosableWindowMask
-#define NSWindowStyleMaskMiniaturizable NSMiniaturizableWindowMask
-#define NSWindowStyleMaskTitled         NSTitledWindowMask
-#endif
-/* 10.13 deprecates NSFileHandlingPanelOKButton in favour of
- * NSModalResponseOK, which was introduced in 10.9. Define
- * it for older versions.
- */
-#if MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_9
-#define NSModalResponseOK NSFileHandlingPanelOKButton
-#endif
 /* 10.14 deprecates NSOnState and NSOffState in favor of
  * NSControlStateValueOn/Off, which were introduced in 10.13.
  * Define for older versions
@@ -122,6 +77,7 @@ typedef struct {
 NSWindow *normalWindow, *about_window;
 static DisplayChangeListener *dcl;
 static int last_buttons;
+static int cursor_hide = 1;
 
 int gArgc;
 char **gArgv;
@@ -131,6 +87,7 @@ NSArray * supportedImageFileTypes;
 
 static QemuSemaphore display_init_sem;
 static QemuSemaphore app_started_sem;
+static bool allow_events;
 
 // Utility functions to run specified code block with iothread lock held
 typedef void (^CodeBlock)(void);
@@ -405,6 +362,41 @@ QemuCocoaView *cocoaView;
     return (p.x > -1 && p.x < screen.width && p.y > -1 && p.y < screen.height);
 }
 
+/* Get location of event and convert to virtual screen coordinate */
+- (CGPoint) screenLocationOfEvent:(NSEvent *)ev
+{
+    NSWindow *eventWindow = [ev window];
+    // XXX: Use CGRect and -convertRectFromScreen: to support macOS 10.10
+    CGRect r = CGRectZero;
+    r.origin = [ev locationInWindow];
+    if (!eventWindow) {
+        if (!isFullscreen) {
+            return [[self window] convertRectFromScreen:r].origin;
+        } else {
+            CGPoint locationInSelfWindow = [[self window] convertRectFromScreen:r].origin;
+            CGPoint loc = [self convertPoint:locationInSelfWindow fromView:nil];
+            if (stretch_video) {
+                loc.x /= cdx;
+                loc.y /= cdy;
+            }
+            return loc;
+        }
+    } else if ([[self window] isEqual:eventWindow]) {
+        if (!isFullscreen) {
+            return r.origin;
+        } else {
+            CGPoint loc = [self convertPoint:r.origin fromView:nil];
+            if (stretch_video) {
+                loc.x /= cdx;
+                loc.y /= cdy;
+            }
+            return loc;
+        }
+    } else {
+        return [[self window] convertRectFromScreen:[eventWindow convertRectToScreen:r]].origin;
+    }
+}
+
 - (void) hideCursor
 {
     if (!cursor_hide) {
@@ -426,11 +418,7 @@ QemuCocoaView *cocoaView;
     COCOA_DEBUG("QemuCocoaView: drawRect\n");
 
     // get CoreGraphic context
-#if MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_10
-    CGContextRef viewContextRef = [[NSGraphicsContext currentContext] graphicsPort];
-#else
     CGContextRef viewContextRef = [[NSGraphicsContext currentContext] CGContext];
-#endif
 
     CGContextSetInterpolationQuality (viewContextRef, kCGInterpolationNone);
     CGContextSetShouldAntialias (viewContextRef, NO);
@@ -691,6 +679,16 @@ QemuCocoaView *cocoaView;
 
 - (bool) handleEvent:(NSEvent *)event
 {
+    if(!allow_events) {
+        /*
+         * Just let OSX have all events that arrive before
+         * applicationDidFinishLaunching.
+         * This avoids a deadlock on the iothread lock, which cocoa_display_init()
+         * will not drop until after the app_started_sem is posted. (In theory
+         * there should not be any such events, but OSX Catalina now emits some.)
+         */
+        return false;
+    }
     return bool_with_iothread_lock(^{
         return [self handleEventLocked:event];
     });
@@ -704,7 +702,8 @@ QemuCocoaView *cocoaView;
     int keycode = 0;
     bool mouse_event = false;
     static bool switched_to_fullscreen = false;
-    NSPoint p = [event locationInWindow];
+    // Location of event in virtual screen coordinates
+    NSPoint p = [self screenLocationOfEvent:event];
 
     switch ([event type]) {
         case NSEventTypeFlagsChanged:
@@ -815,7 +814,10 @@ QemuCocoaView *cocoaView;
             break;
         case NSEventTypeMouseMoved:
             if (isAbsoluteEnabled) {
-                if (![self screenContainsPoint:p] || ![[self window] isKeyWindow]) {
+                // Cursor re-entered into a window might generate events bound to screen coordinates
+                // and `nil` window property, and in full screen mode, current window might not be
+                // key window, where event location alone should suffice.
+                if (![self screenContainsPoint:p] || !([[self window] isKeyWindow] || isFullscreen)) {
                     if (isMouseGrabbed) {
                         [self ungrabMouse];
                     }
@@ -862,7 +864,12 @@ QemuCocoaView *cocoaView;
         case NSEventTypeLeftMouseUp:
             mouse_event = true;
             if (!isMouseGrabbed && [self screenContainsPoint:p]) {
-                if([[self window] isKeyWindow]) {
+                /*
+                 * In fullscreen mode, the window of cocoaView may not be the
+                 * key window, therefore the position relative to the virtual
+                 * screen alone will be sufficient.
+                 */
+                if(isFullscreen || [[self window] isKeyWindow]) {
                     [self grabMouse];
                 }
             }
@@ -1017,9 +1024,7 @@ QemuCocoaView *cocoaView;
  ------------------------------------------------------
 */
 @interface QemuCocoaAppController : NSObject
-#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
                                        <NSWindowDelegate, NSApplicationDelegate>
-#endif
 {
 }
 - (void)doToggleFullScreen:(id)sender;
@@ -1068,9 +1073,6 @@ QemuCocoaView *cocoaView;
         [normalWindow setAcceptsMouseMovedEvents:YES];
         [normalWindow setTitle:@"QEMU"];
         [normalWindow setContentView:cocoaView];
-#if (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_10)
-        [normalWindow useOptimizedDrawing:YES];
-#endif
         [normalWindow makeKeyAndOrderFront:self];
         [normalWindow center];
         [normalWindow setDelegate: self];
@@ -1109,6 +1111,7 @@ QemuCocoaView *cocoaView;
 - (void)applicationDidFinishLaunching: (NSNotification *) note
 {
     COCOA_DEBUG("QemuCocoaAppController: applicationDidFinishLaunching\n");
+    allow_events = true;
     /* Tell cocoa_display_init to proceed */
     qemu_sem_post(&app_started_sem);
 }
@@ -1173,7 +1176,7 @@ QemuCocoaView *cocoaView;
 - (void) openDocumentation: (NSString *) filename
 {
     /* Where to look for local files */
-    NSString *path_array[] = {@"../share/doc/qemu/", @"../doc/qemu/", @"../"};
+    NSString *path_array[] = {@"../share/doc/qemu/", @"../doc/qemu/", @"../docs/"};
     NSString *full_file_path;
 
     /* iterate thru the possible paths until the file is found */
@@ -1197,7 +1200,7 @@ QemuCocoaView *cocoaView;
 {
     COCOA_DEBUG("QemuCocoaAppController: showQEMUDoc\n");
 
-    [self openDocumentation: @"qemu-doc.html"];
+    [self openDocumentation: @"index.html"];
 }
 
 /* Stretches video to fit host monitor size */
@@ -1858,6 +1861,9 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
             [NSApp activateIgnoringOtherApps: YES];
             [(QemuCocoaAppController *)[[NSApplication sharedApplication] delegate] toggleFullScreen: nil];
         });
+    }
+    if (opts->has_show_cursor && opts->show_cursor) {
+        cursor_hide = 0;
     }
 
     dcl = g_malloc0(sizeof(DisplayChangeListener));

@@ -23,10 +23,13 @@
 #include "internal.h"
 #include "exec/gdbstub.h"
 #include "qemu/timer.h"
+#include "qemu/qemu-print.h"
 #include "hw/s390x/ioinst.h"
+#include "hw/s390x/pv.h"
 #include "sysemu/hw_accel.h"
+#include "sysemu/runstate.h"
 #ifndef CONFIG_USER_ONLY
-#include "sysemu/sysemu.h"
+#include "sysemu/tcg.h"
 #endif
 
 #ifndef CONFIG_USER_ONLY
@@ -39,9 +42,6 @@ void s390x_cpu_timer(void *opaque)
 {
     cpu_inject_cpu_timer((S390CPU *) opaque);
 }
-#endif
-
-#ifndef CONFIG_USER_ONLY
 
 hwaddr s390_cpu_get_phys_page_debug(CPUState *cs, vaddr vaddr)
 {
@@ -50,13 +50,23 @@ hwaddr s390_cpu_get_phys_page_debug(CPUState *cs, vaddr vaddr)
     target_ulong raddr;
     int prot;
     uint64_t asc = env->psw.mask & PSW_MASK_ASC;
+    uint64_t tec;
 
     /* 31-Bit mode */
     if (!(env->psw.mask & PSW_MASK_64)) {
         vaddr &= 0x7fffffff;
     }
 
-    if (mmu_translate(env, vaddr, MMU_INST_FETCH, asc, &raddr, &prot, false)) {
+    /* We want to read the code (e.g., see what we are single-stepping).*/
+    if (asc != PSW_ASC_HOME) {
+        asc = PSW_ASC_PRIMARY;
+    }
+
+    /*
+     * We want to read code even if IEP is active. Use MMU_DATA_LOAD instead
+     * of MMU_INST_FETCH.
+     */
+    if (mmu_translate(env, vaddr, MMU_DATA_LOAD, asc, &raddr, &prot, &tec)) {
         return -1;
     }
     return raddr;
@@ -77,7 +87,7 @@ hwaddr s390_cpu_get_phys_addr_debug(CPUState *cs, vaddr vaddr)
 static inline bool is_special_wait_psw(uint64_t psw_addr)
 {
     /* signal quiesce */
-    return psw_addr == 0xfffUL;
+    return (psw_addr & 0xfffUL) == 0xfffUL;
 }
 
 void s390_handle_wait(S390CPU *cpu)
@@ -85,14 +95,12 @@ void s390_handle_wait(S390CPU *cpu)
     CPUState *cs = CPU(cpu);
 
     if (s390_cpu_halt(cpu) == 0) {
-#ifndef CONFIG_USER_ONLY
         if (is_special_wait_psw(cpu->env.psw.addr)) {
             qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
         } else {
             cpu->env.crash_reason = S390_CRASH_REASON_DISABLED_WAIT;
             qemu_system_guest_panicked(cpu_get_crash_info(cs));
         }
-#endif
     }
 }
 
@@ -110,11 +118,11 @@ void load_psw(CPUS390XState *env, uint64_t mask, uint64_t addr)
     env->cc_op = (mask >> 44) & 3;
 
     if ((old_mask ^ mask) & PSW_MASK_PER) {
-        s390_cpu_recompute_watchpoints(CPU(s390_env_get_cpu(env)));
+        s390_cpu_recompute_watchpoints(env_cpu(env));
     }
 
     if (mask & PSW_MASK_WAIT) {
-        s390_handle_wait(s390_env_get_cpu(env));
+        s390_handle_wait(env_archcpu(env));
     }
 }
 
@@ -136,14 +144,13 @@ uint64_t get_psw_mask(CPUS390XState *env)
 
 LowCore *cpu_map_lowcore(CPUS390XState *env)
 {
-    S390CPU *cpu = s390_env_get_cpu(env);
     LowCore *lowcore;
     hwaddr len = sizeof(LowCore);
 
-    lowcore = cpu_physical_memory_map(env->psa, &len, 1);
+    lowcore = cpu_physical_memory_map(env->psa, &len, true);
 
     if (len < sizeof(LowCore)) {
-        cpu_abort(CPU(cpu), "Could not map lowcore\n");
+        cpu_abort(env_cpu(env), "Could not map lowcore\n");
     }
 
     return lowcore;
@@ -235,7 +242,12 @@ int s390_store_status(S390CPU *cpu, hwaddr addr, bool store_arch)
     hwaddr len = sizeof(*sa);
     int i;
 
-    sa = cpu_physical_memory_map(addr, &len, 1);
+    /* For PVMs storing will occur when this cpu enters SIE again */
+    if (s390_is_pv()) {
+        return 0;
+    }
+
+    sa = cpu_physical_memory_map(addr, &len, true);
     if (!sa) {
         return -EFAULT;
     }
@@ -248,7 +260,7 @@ int s390_store_status(S390CPU *cpu, hwaddr addr, bool store_arch)
         cpu_physical_memory_write(offsetof(LowCore, ar_access_id), &ar_id, 1);
     }
     for (i = 0; i < 16; ++i) {
-        sa->fprs[i] = cpu_to_be64(get_freg(&cpu->env, i)->ll);
+        sa->fprs[i] = cpu_to_be64(*get_freg(&cpu->env, i));
     }
     for (i = 0; i < 16; ++i) {
         sa->grs[i] = cpu_to_be64(cpu->env.regs[i]);
@@ -287,7 +299,7 @@ int s390_store_adtl_status(S390CPU *cpu, hwaddr addr, hwaddr len)
     hwaddr save = len;
     int i;
 
-    sa = cpu_physical_memory_map(addr, &save, 1);
+    sa = cpu_physical_memory_map(addr, &save, true);
     if (!sa) {
         return -EFAULT;
     }
@@ -298,8 +310,8 @@ int s390_store_adtl_status(S390CPU *cpu, hwaddr addr, hwaddr len)
 
     if (s390_has_feat(S390_FEAT_VECTOR)) {
         for (i = 0; i < 32; i++) {
-            sa->vregs[i][0] = cpu_to_be64(cpu->env.vregs[i][0].ll);
-            sa->vregs[i][1] = cpu_to_be64(cpu->env.vregs[i][1].ll);
+            sa->vregs[i][0] = cpu_to_be64(cpu->env.vregs[i][0]);
+            sa->vregs[i][1] = cpu_to_be64(cpu->env.vregs[i][1]);
         }
     }
     if (s390_has_feat(S390_FEAT_GUARDED_STORAGE) && len >= ADTL_GS_MIN_SIZE) {
@@ -313,65 +325,64 @@ int s390_store_adtl_status(S390CPU *cpu, hwaddr addr, hwaddr len)
 }
 #endif /* CONFIG_USER_ONLY */
 
-void s390_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                         int flags)
+void s390_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     S390CPU *cpu = S390_CPU(cs);
     CPUS390XState *env = &cpu->env;
     int i;
 
     if (env->cc_op > 3) {
-        cpu_fprintf(f, "PSW=mask %016" PRIx64 " addr %016" PRIx64 " cc %15s\n",
-                    env->psw.mask, env->psw.addr, cc_name(env->cc_op));
+        qemu_fprintf(f, "PSW=mask %016" PRIx64 " addr %016" PRIx64 " cc %15s\n",
+                     env->psw.mask, env->psw.addr, cc_name(env->cc_op));
     } else {
-        cpu_fprintf(f, "PSW=mask %016" PRIx64 " addr %016" PRIx64 " cc %02x\n",
-                    env->psw.mask, env->psw.addr, env->cc_op);
+        qemu_fprintf(f, "PSW=mask %016" PRIx64 " addr %016" PRIx64 " cc %02x\n",
+                     env->psw.mask, env->psw.addr, env->cc_op);
     }
 
     for (i = 0; i < 16; i++) {
-        cpu_fprintf(f, "R%02d=%016" PRIx64, i, env->regs[i]);
+        qemu_fprintf(f, "R%02d=%016" PRIx64, i, env->regs[i]);
         if ((i % 4) == 3) {
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         } else {
-            cpu_fprintf(f, " ");
+            qemu_fprintf(f, " ");
         }
     }
 
     if (flags & CPU_DUMP_FPU) {
         if (s390_has_feat(S390_FEAT_VECTOR)) {
             for (i = 0; i < 32; i++) {
-                cpu_fprintf(f, "V%02d=%016" PRIx64 "%016" PRIx64 "%c",
-                            i, env->vregs[i][0].ll, env->vregs[i][1].ll,
-                            i % 2 ? '\n' : ' ');
+                qemu_fprintf(f, "V%02d=%016" PRIx64 "%016" PRIx64 "%c",
+                             i, env->vregs[i][0], env->vregs[i][1],
+                             i % 2 ? '\n' : ' ');
             }
         } else {
             for (i = 0; i < 16; i++) {
-                cpu_fprintf(f, "F%02d=%016" PRIx64 "%c",
-                            i, get_freg(env, i)->ll,
-                            (i % 4) == 3 ? '\n' : ' ');
+                qemu_fprintf(f, "F%02d=%016" PRIx64 "%c",
+                             i, *get_freg(env, i),
+                             (i % 4) == 3 ? '\n' : ' ');
             }
         }
     }
 
 #ifndef CONFIG_USER_ONLY
     for (i = 0; i < 16; i++) {
-        cpu_fprintf(f, "C%02d=%016" PRIx64, i, env->cregs[i]);
+        qemu_fprintf(f, "C%02d=%016" PRIx64, i, env->cregs[i]);
         if ((i % 4) == 3) {
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         } else {
-            cpu_fprintf(f, " ");
+            qemu_fprintf(f, " ");
         }
     }
 #endif
 
 #ifdef DEBUG_INLINE_BRANCHES
     for (i = 0; i < CC_OP_MAX; i++) {
-        cpu_fprintf(f, "  %15s = %10ld\t%10ld\n", cc_name(i),
-                    inline_branch_miss[i], inline_branch_hit[i]);
+        qemu_fprintf(f, "  %15s = %10ld\t%10ld\n", cc_name(i),
+                     inline_branch_miss[i], inline_branch_hit[i]);
     }
 #endif
 
-    cpu_fprintf(f, "\n");
+    qemu_fprintf(f, "\n");
 }
 
 const char *cc_name(enum cc_op cc_op)
@@ -418,6 +429,9 @@ const char *cc_name(enum cc_op cc_op)
         [CC_OP_SLA_64]    = "CC_OP_SLA_64",
         [CC_OP_FLOGR]     = "CC_OP_FLOGR",
         [CC_OP_LCBB]      = "CC_OP_LCBB",
+        [CC_OP_VC]        = "CC_OP_VC",
+        [CC_OP_MULS_32]   = "CC_OP_MULS_32",
+        [CC_OP_MULS_64]   = "CC_OP_MULS_64",
     };
 
     return cc_names[cc_op];

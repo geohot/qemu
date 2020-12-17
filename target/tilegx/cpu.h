@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,14 +20,8 @@
 #ifndef TILEGX_CPU_H
 #define TILEGX_CPU_H
 
-#include "qemu-common.h"
-
-#define TARGET_LONG_BITS 64
-
-#define CPUArchState struct CPUTLGState
-
 #include "exec/cpu-defs.h"
-
+#include "qom/object.h"
 
 /* TILE-Gx common register alias */
 #define TILEGX_R_RE    0   /*  0 register, for function/syscall return value */
@@ -99,20 +93,14 @@ typedef struct CPUTLGState {
 
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
-
-    CPU_COMMON
 } CPUTLGState;
 
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 #define TYPE_TILEGX_CPU "tilegx-cpu"
 
-#define TILEGX_CPU_CLASS(klass) \
-    OBJECT_CLASS_CHECK(TileGXCPUClass, (klass), TYPE_TILEGX_CPU)
-#define TILEGX_CPU(obj) \
-    OBJECT_CHECK(TileGXCPU, (obj), TYPE_TILEGX_CPU)
-#define TILEGX_CPU_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(TileGXCPUClass, (obj), TYPE_TILEGX_CPU)
+OBJECT_DECLARE_TYPE(TileGXCPU, TileGXCPUClass,
+                    TILEGX_CPU)
 
 /**
  * TileGXCPUClass:
@@ -121,14 +109,14 @@ typedef struct CPUTLGState {
  *
  * A Tile-Gx CPU model.
  */
-typedef struct TileGXCPUClass {
+struct TileGXCPUClass {
     /*< private >*/
     CPUClass parent_class;
     /*< public >*/
 
     DeviceRealize parent_realize;
-    void (*parent_reset)(CPUState *cpu);
-} TileGXCPUClass;
+    DeviceReset parent_reset;
+};
 
 /**
  * TileGXCPU:
@@ -136,28 +124,21 @@ typedef struct TileGXCPUClass {
  *
  * A Tile-GX CPU.
  */
-typedef struct TileGXCPU {
+struct TileGXCPU {
     /*< private >*/
     CPUState parent_obj;
     /*< public >*/
 
+    CPUNegativeOffsetState neg;
     CPUTLGState env;
-} TileGXCPU;
+};
 
-static inline TileGXCPU *tilegx_env_get_cpu(CPUTLGState *env)
-{
-    return container_of(env, TileGXCPU, env);
-}
-
-#define ENV_GET_CPU(e) CPU(tilegx_env_get_cpu(e))
-
-#define ENV_OFFSET offsetof(TileGXCPU, env)
 
 /* TILE-Gx memory attributes */
-#define TARGET_PAGE_BITS 16  /* TILE-Gx uses 64KB page size */
-#define TARGET_PHYS_ADDR_SPACE_BITS 42
-#define TARGET_VIRT_ADDR_SPACE_BITS 64
 #define MMU_USER_IDX    0  /* Current memory operation is in user mode */
+
+typedef CPUTLGState CPUArchState;
+typedef TileGXCPU ArchCPU;
 
 #include "exec/cpu-all.h"
 

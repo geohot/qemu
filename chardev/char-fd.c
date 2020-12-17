@@ -21,10 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "chardev/char.h"
 #include "io/channel-file.h"
 
@@ -117,7 +119,7 @@ int qmp_chardev_open_file_source(char *src, int flags, Error **errp)
 {
     int fd = -1;
 
-    TFR(fd = qemu_open(src, flags, 0666));
+    TFR(fd = qemu_open_old(src, flags, 0666));
     if (fd == -1) {
         error_setg_file_open(errp, errno, src);
     }

@@ -36,6 +36,7 @@
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "sysemu/device_tree.h"
+#include "sysemu/reset.h"
 #include "sysemu/sysemu.h"
 #include "hw/loader.h"
 #include "elf.h"
@@ -108,6 +109,7 @@ static int nios2_load_dtb(struct nios2_boot_info bi, const uint32_t ramsize,
     }
 
     cpu_physical_memory_write(bi.fdt, fdt, fdt_size);
+    g_free(fdt);
     return fdt_size;
 }
 
@@ -137,8 +139,7 @@ void nios2_load_kernel(Nios2CPU *cpu, hwaddr ddr_base,
 
     if (kernel_filename) {
         int kernel_size, fdt_size;
-        uint64_t entry, low, high;
-        uint32_t base32;
+        uint64_t entry, high;
         int big_endian = 0;
 
 #ifdef TARGET_WORDS_BIGENDIAN
@@ -147,18 +148,25 @@ void nios2_load_kernel(Nios2CPU *cpu, hwaddr ddr_base,
 
         /* Boots a kernel elf binary. */
         kernel_size = load_elf(kernel_filename, NULL, NULL, NULL,
-                               &entry, &low, &high,
+                               &entry, NULL, &high, NULL,
                                big_endian, EM_ALTERA_NIOS2, 0, 0);
-        base32 = entry;
-        if (base32 == 0xc0000000) {
+        if ((uint32_t)entry == 0xc0000000) {
+            /*
+             * The Nios II processor reference guide documents that the
+             * kernel is placed at virtual memory address 0xc0000000,
+             * and we've got something that points there.  Reload it
+             * and adjust the entry to get the address in physical RAM.
+             */
             kernel_size = load_elf(kernel_filename, NULL,
                                    translate_kernel_address, NULL,
-                                   &entry, NULL, NULL,
+                                   &entry, NULL, NULL, NULL,
                                    big_endian, EM_ALTERA_NIOS2, 0, 0);
+            boot_info.bootstrap_pc = ddr_base + 0xc0000000 +
+                (entry & 0x07ffffff);
+        } else {
+            /* Use the entry point in the ELF image.  */
+            boot_info.bootstrap_pc = (uint32_t)entry;
         }
-
-        /* Always boot into physical ram. */
-        boot_info.bootstrap_pc = ddr_base + 0xc0000000 + (entry & 0x07ffffff);
 
         /* If it wasn't an ELF image, try an u-boot image. */
         if (kernel_size < 0) {

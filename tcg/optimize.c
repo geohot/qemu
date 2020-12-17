@@ -24,9 +24,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
-#include "exec/cpu-common.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 
 #define CASE_OP_32_64(x)                        \
         glue(glue(case INDEX_op_, x), _i32):    \
@@ -734,9 +732,13 @@ void tcg_optimize(TCGContext *s)
                 } else if (opc == INDEX_op_sub_i64) {
                     neg_op = INDEX_op_neg_i64;
                     have_neg = TCG_TARGET_HAS_neg_i64;
-                } else {
+                } else if (TCG_TARGET_HAS_neg_vec) {
+                    TCGType type = TCGOP_VECL(op) + TCG_TYPE_V64;
+                    unsigned vece = TCGOP_VECE(op);
                     neg_op = INDEX_op_neg_vec;
-                    have_neg = TCG_TARGET_HAS_neg_vec;
+                    have_neg = tcg_can_emit_vec_op(neg_op, type, vece) > 0;
+                } else {
+                    break;
                 }
                 if (!have_neg) {
                     break;
@@ -1011,7 +1013,7 @@ void tcg_optimize(TCGContext *s)
         CASE_OP_32_64(qemu_ld):
             {
                 TCGMemOpIdx oi = op->args[nb_oargs + nb_iargs];
-                TCGMemOp mop = get_memop(oi);
+                MemOp mop = get_memop(oi);
                 if (!(mop & MO_SIGN)) {
                     mask = (2ULL << ((8 << (mop & MO_SIZE)) - 1)) - 1;
                 }
@@ -1107,6 +1109,21 @@ void tcg_optimize(TCGContext *s)
             }
             goto do_default;
 
+        case INDEX_op_dup2_vec:
+            assert(TCG_TARGET_REG_BITS == 32);
+            if (arg_is_const(op->args[1]) && arg_is_const(op->args[2])) {
+                tmp = arg_info(op->args[1])->val;
+                if (tmp == arg_info(op->args[2])->val) {
+                    tcg_opt_gen_movi(s, op, op->args[0], tmp);
+                    break;
+                }
+            } else if (args_are_copies(op->args[1], op->args[2])) {
+                op->opc = INDEX_op_dup_vec;
+                TCGOP_VECE(op) = MO_32;
+                nb_iargs = 1;
+            }
+            goto do_default;
+
         CASE_OP_32_64(not):
         CASE_OP_32_64(neg):
         CASE_OP_32_64(ext8s):
@@ -1197,6 +1214,22 @@ void tcg_optimize(TCGContext *s)
             if (arg_is_const(op->args[1])) {
                 tmp = sextract64(arg_info(op->args[1])->val,
                                  op->args[2], op->args[3]);
+                tcg_opt_gen_movi(s, op, op->args[0], tmp);
+                break;
+            }
+            goto do_default;
+
+        CASE_OP_32_64(extract2):
+            if (arg_is_const(op->args[1]) && arg_is_const(op->args[2])) {
+                TCGArg v1 = arg_info(op->args[1])->val;
+                TCGArg v2 = arg_info(op->args[2])->val;
+
+                if (opc == INDEX_op_extract2_i64) {
+                    tmp = (v1 >> op->args[3]) | (v2 << (64 - op->args[3]));
+                } else {
+                    tmp = (int32_t)(((uint32_t)v1 >> op->args[3]) |
+                                    ((uint32_t)v2 << (32 - op->args[3])));
+                }
                 tcg_opt_gen_movi(s, op, op->args[0], tmp);
                 break;
             }

@@ -19,8 +19,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
+#include "hw/irq.h"
 
 #include "qemu/config-file.h"
 
@@ -54,12 +54,10 @@ static void nios2_pic_cpu_handler(void *opaque, int irq, int level)
 
 void nios2_check_interrupts(CPUNios2State *env)
 {
-    Nios2CPU *cpu = nios2_env_get_cpu(env);
-    CPUState *cs = CPU(cpu);
-
-    if (env->irq_pending) {
+    if (env->irq_pending &&
+        (env->regs[CR_STATUS] & CR_STATUS_PIE)) {
         env->irq_pending = 0;
-        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+        cpu_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
     }
 }
 

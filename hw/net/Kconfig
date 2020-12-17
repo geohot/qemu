@@ -1,15 +1,20 @@
 config DP8393X
     bool
 
+config NE2000_COMMON
+    bool
+
 config NE2000_PCI
     bool
     default y if PCI_DEVICES
     depends on PCI
+    select NE2000_COMMON
 
 config EEPRO100_PCI
     bool
     default y if PCI_DEVICES
     depends on PCI
+    select NMC93XX_EEPROM
 
 config PCNET_PCI
     bool
@@ -20,6 +25,15 @@ config PCNET_PCI
 config PCNET_COMMON
     bool
 
+config TULIP
+    bool
+    default y if PCI_DEVICES
+    depends on PCI
+    select NMC93XX_EEPROM
+
+config I82596_COMMON
+    bool
+
 config E1000_PCI
     bool
     default y if PCI_DEVICES
@@ -28,7 +42,7 @@ config E1000_PCI
 config E1000E_PCI_EXPRESS
     bool
     default y if PCI_DEVICES
-    depends on PCI_EXPRESS
+    depends on PCI_EXPRESS && MSI_NONBROKEN
 
 config RTL8139_PCI
     bool
@@ -51,8 +65,7 @@ config NE2000_ISA
     bool
     default y
     depends on ISA_BUS
-    depends on PCI # for NE2000State
-    select NE2000_PCI
+    select NE2000_COMMON
 
 config OPENCORES_ETH
     bool
@@ -64,6 +77,9 @@ config MIPSNET
     bool
 
 config ALLWINNER_EMAC
+    bool
+
+config ALLWINNER_SUN8I_EMAC
     bool
 
 config IMX_FEC
@@ -78,6 +94,10 @@ config STELLARIS_ENET
 config LANCE
     bool
     select PCNET_COMMON
+
+config LASI_82596
+    bool
+    select I82596_COMMON
 
 config SUNHME
     bool
@@ -107,19 +127,29 @@ config ETSEC
 config ROCKER
     bool
     default y if PCI_DEVICES
-    depends on PCI
+    depends on PCI && MSI_NONBROKEN
 
 config CAN_BUS
     bool
 
-config CAN_PCI
-    bool
-    default y if PCI_DEVICES
-    depends on PCI
-    select CAN_BUS
-
 config CAN_SJA1000
     bool
     default y if PCI_DEVICES
-    depends on PCI
+    select CAN_BUS
+
+config CAN_PCI
+    bool
+    default y if PCI_DEVICES
+    depends on PCI && CAN_SJA1000
+    select CAN_BUS
+
+config CAN_CTUCANFD
+    bool
+    default y if PCI_DEVICES
+    select CAN_BUS
+
+config CAN_CTUCANFD_PCI
+    bool
+    default y if PCI_DEVICES
+    depends on PCI && CAN_CTUCANFD
     select CAN_BUS

@@ -10,12 +10,14 @@
 
 #include "virtio-pci.h"
 #include "hw/virtio/virtio-input.h"
+#include "qemu/module.h"
+#include "qom/object.h"
 
 typedef struct VirtIOInputHostPCI VirtIOInputHostPCI;
 
-#define TYPE_VIRTIO_INPUT_HOST_PCI "virtio-input-host-pci-base"
-#define VIRTIO_INPUT_HOST_PCI(obj) \
-        OBJECT_CHECK(VirtIOInputHostPCI, (obj), TYPE_VIRTIO_INPUT_HOST_PCI)
+#define TYPE_VIRTIO_INPUT_HOST_PCI "virtio-input-host-pci"
+DECLARE_INSTANCE_CHECKER(VirtIOInputHostPCI, VIRTIO_INPUT_HOST_PCI,
+                         TYPE_VIRTIO_INPUT_HOST_PCI)
 
 struct VirtIOInputHostPCI {
     VirtIOPCIProxy parent_obj;
@@ -31,10 +33,7 @@ static void virtio_host_initfn(Object *obj)
 }
 
 static const VirtioPCIDeviceTypeInfo virtio_input_host_pci_info = {
-    .base_name             = TYPE_VIRTIO_INPUT_HOST_PCI,
-    .generic_name          = "virtio-input-host-pci",
-    .transitional_name     = "virtio-input-host-pci-transitional",
-    .non_transitional_name = "virtio-input-host-pci-non-transitional",
+    .generic_name  = TYPE_VIRTIO_INPUT_HOST_PCI,
     .parent        = TYPE_VIRTIO_INPUT_PCI,
     .instance_size = sizeof(VirtIOInputHostPCI),
     .instance_init = virtio_host_initfn,
